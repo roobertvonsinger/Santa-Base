@@ -1,0 +1,65 @@
+http:
+  routers:
+    # Redireccion de /santander legacy a /santabase canonico
+    santander-redirect-karen:
+      rule: "Host(`karen.2puty.tech`) && PathPrefix(`/santander`)"
+      entryPoints:
+        - websecure
+      priority: 160
+      middlewares:
+        - santander-to-santabase-redir
+      service: santander-service
+      tls:
+        certResolver: letsencrypt
+
+    santander-redirect-2puty:
+      rule: "Host(`2puty.tech`) && PathPrefix(`/santander`)"
+      entryPoints:
+        - websecure
+      priority: 160
+      middlewares:
+        - santander-to-santabase-redir
+      service: santander-service
+      tls:
+        certResolver: letsencrypt
+
+    # Router Santa Base
+    santabase-karen:
+      rule: "Host(`karen.2puty.tech`) && PathPrefix(`/santabase`)"
+      entryPoints:
+        - websecure
+      priority: 150
+      middlewares:
+        - santabase-strip
+      service: santander-service
+      tls:
+        certResolver: letsencrypt
+
+    santabase-2puty:
+      rule: "Host(`2puty.tech`) && PathPrefix(`/santabase`)"
+      entryPoints:
+        - websecure
+      priority: 150
+      middlewares:
+        - santabase-strip
+      service: santander-service
+      tls:
+        certResolver: letsencrypt
+
+  middlewares:
+    santander-to-santabase-redir:
+      redirectRegex:
+        regex: "^https?://([^/]+)/santander(.*)"
+        replacement: "https://${1}/santabase${2}"
+        permanent: false
+
+    santabase-strip:
+      stripPrefix:
+        prefixes:
+          - /santabase
+
+  services:
+    santander-service:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8055"
