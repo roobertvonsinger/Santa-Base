@@ -1264,6 +1264,18 @@ HTML_CONTENT = """<!DOCTYPE html>
       cursor: crosshair;
     }
 
+    /* Rango de celdas seleccionadas por arrastre (misma columna) o Ctrl+arrastre (multi-segmento) */
+    td.excel-cell.excel-range-selected {
+      background-color: var(--excel-selection-bg) !important;
+      box-shadow: inset 1px 0 0 var(--color-primary), inset -1px 0 0 var(--color-primary);
+    }
+    td.excel-cell.excel-range-edge-top {
+      box-shadow: inset 1px 0 0 var(--color-primary), inset -1px 0 0 var(--color-primary), inset 0 2px 0 var(--color-primary);
+    }
+    td.excel-cell.excel-range-edge-bottom {
+      box-shadow: inset 1px 0 0 var(--color-primary), inset -1px 0 0 var(--color-primary), inset 0 -2px 0 var(--color-primary);
+    }
+
     @keyframes cellSavedAnim {
       0% { background-color: #065f46; color: #fff; }
       100% { background-color: transparent; }
@@ -1698,6 +1710,8 @@ HTML_CONTENT = """<!DOCTYPE html>
       <button class="btn btn-outline" onclick="copyPageRfcs()" title="Copiar todos los RFCs de la página">📄 RFCs Pág</button>
       <button class="btn btn-outline" onclick="copyPageCurps()" title="Copiar todas las CURPs de la página">📄 CURPs Pág</button>
       <button class="btn btn-danger-outline" id="btn-clear-selection" onclick="clearSelection()" title="Limpiar selección" style="display:none; padding: 4px 8px;">✕</button>
+      <button class="btn btn-primary" id="btn-copy-range" onclick="copyCellRangeSelection()" title="Copiar celdas seleccionadas" style="display:none;">🎯 Copiar Selección (<span id="range-sel-count">0</span>)</button>
+      <button class="btn btn-danger-outline" id="btn-clear-range" onclick="clearCellRangeSelection()" title="Limpiar selección de celdas" style="display:none; padding: 4px 8px;">✕</button>
     </div>
 
     <div class="tb-sep"></div>
@@ -1850,6 +1864,12 @@ HTML_CONTENT = """<!DOCTYPE html>
     let isEditingCell = false;
     let cellEditorElem = null;
 
+    // --- Selección de rango de celdas por columna (arrastrar / Ctrl+arrastrar multi-segmento) ---
+    // segments: array de {colIdx, start, end} ya confirmados (soltados)
+    // drag: segmento en curso mientras el mouse está presionado, o null
+    let cellRangeSelection = { segments: [], drag: null };
+    let suppressNextCellTextClick = false;
+
     // Cálculo dinámico de posiciones sticky sumando anchos reales
     function updateStickyOffsets() {
       const rowNumWidth = 38;
@@ -1887,6 +1907,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         e.stopPropagation();
         e.preventDefault();
       }
+      if (suppressNextCellTextClick) { suppressNextCellTextClick = false; return; }
       if (!text) return;
       const cleanText = String(text).trim();
 
@@ -2206,6 +2227,8 @@ HTML_CONTENT = """<!DOCTYPE html>
                 data-raw-val="${escapeHtml(rawVal)}"
                 title="${escapeHtml(rawVal)}"
                 onclick="handleCellClick(event, ${rIdx}, ${cIdx})"
+                onmousedown="handleCellRangeMouseDown(event, ${rIdx}, ${cIdx})"
+                onmouseenter="handleCellRangeMouseEnter(event, ${rIdx}, ${cIdx})"
                 ondblclick="startCellEdit(${rIdx}, ${cIdx})"
                 oncontextmenu="handleCellContextMenu(event, ${rIdx}, ${cIdx})">
                 ${displayContent}
@@ -2234,7 +2257,128 @@ HTML_CONTENT = """<!DOCTYPE html>
       return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     }
 
+    // ============ Selección de rango de celdas (arrastrar / Ctrl+arrastrar) ============
+    // Restringida a UNA columna por selección: arrastra hacia abajo para tomar C5:C20,
+    // Ctrl+arrastra un segundo tramo para agregar C25:C30 sin perder el primero.
+    function handleCellRangeMouseDown(e, rowIdx, colIdx) {
+      if (e.button !== 0) return; // solo click izquierdo
+      const isCtrl = e.ctrlKey || e.metaKey;
+
+      if (!isCtrl) {
+        cellRangeSelection.segments = [];
+      } else if (cellRangeSelection.segments.length > 0 && cellRangeSelection.segments[0].colIdx !== colIdx) {
+        cellRangeSelection.segments = [];
+        showToast('↺ Selección reiniciada (nueva columna)');
+      }
+      cellRangeSelection.drag = { colIdx, start: rowIdx, end: rowIdx, moved: false, ctrl: isCtrl };
+      renderCellRangeHighlight();
+    }
+
+    function handleCellRangeMouseEnter(e, rowIdx, colIdx) {
+      const d = cellRangeSelection.drag;
+      if (!d) return;
+      if (e.buttons !== 1) { cellRangeSelection.drag = null; return; }
+      if (colIdx !== d.colIdx) return; // el arrastre solo extiende dentro de la misma columna
+      if (rowIdx !== d.end) d.moved = true;
+      d.end = rowIdx;
+      renderCellRangeHighlight();
+    }
+
+    function finalizeCellRangeDrag() {
+      const d = cellRangeSelection.drag;
+      if (!d) return;
+      cellRangeSelection.drag = null;
+
+      if (d.moved || d.ctrl) {
+        cellRangeSelection.segments.push({ colIdx: d.colIdx, start: Math.min(d.start, d.end), end: Math.max(d.start, d.end) });
+        // Si mousedown y mouseup cayeron en celdas distintas, el navegador nunca dispara 'click'
+        // y esta bandera quedaría armada contaminando el siguiente click real. Se autolimpia en el
+        // próximo tick: si sí hay 'click' síncrono (mismo elemento), lo consume primero.
+        suppressNextCellTextClick = true;
+        setTimeout(() => { suppressNextCellTextClick = false; }, 0);
+      }
+      renderCellRangeHighlight();
+      updateRangeSelectionUI();
+    }
+
+    function renderCellRangeHighlight() {
+      document.querySelectorAll('.excel-range-selected, .excel-range-edge-top, .excel-range-edge-bottom').forEach(el => {
+        el.classList.remove('excel-range-selected', 'excel-range-edge-top', 'excel-range-edge-bottom');
+      });
+      const segs = cellRangeSelection.segments.slice();
+      if (cellRangeSelection.drag) {
+        const d = cellRangeSelection.drag;
+        segs.push({ colIdx: d.colIdx, start: Math.min(d.start, d.end), end: Math.max(d.start, d.end) });
+      }
+      segs.forEach(seg => {
+        for (let r = seg.start; r <= seg.end; r++) {
+          const cell = document.getElementById(`cell-${r}-${seg.colIdx}`);
+          if (!cell) continue;
+          cell.classList.add('excel-range-selected');
+          if (r === seg.start) cell.classList.add('excel-range-edge-top');
+          if (r === seg.end) cell.classList.add('excel-range-edge-bottom');
+        }
+      });
+    }
+
+    function getCellRangeCount() {
+      return cellRangeSelection.segments.reduce((acc, s) => acc + (s.end - s.start + 1), 0);
+    }
+
+    function getCellRangeValues() {
+      const values = [];
+      cellRangeSelection.segments.slice().sort((a, b) => a.start - b.start).forEach(seg => {
+        for (let r = seg.start; r <= seg.end; r++) {
+          const cell = document.getElementById(`cell-${r}-${seg.colIdx}`);
+          if (cell) values.push(cell.getAttribute('data-raw-val') || '');
+        }
+      });
+      return values;
+    }
+
+    function copyCellRangeSelection() {
+      const values = getCellRangeValues();
+      if (values.length === 0) return;
+      const text = values.join(String.fromCharCode(10));
+      const colIdx = cellRangeSelection.segments[0].colIdx;
+      const col = COLUMNS[colIdx];
+      const done = () => showToast(`✓ ${values.length} valores de ${col ? col.label : 'columna'} copiados`);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done).catch(() => { fallbackCopy(text); done(); });
+      } else {
+        fallbackCopy(text);
+        done();
+      }
+    }
+
+    function clearCellRangeSelection() {
+      cellRangeSelection.segments = [];
+      cellRangeSelection.drag = null;
+      renderCellRangeHighlight();
+      updateRangeSelectionUI();
+    }
+
+    function updateRangeSelectionUI() {
+      const btn = document.getElementById('btn-copy-range');
+      const clearBtn = document.getElementById('btn-clear-range');
+      const countEl = document.getElementById('range-sel-count');
+      if (!btn || !countEl) return;
+      const count = getCellRangeCount();
+      if (count > 0) {
+        btn.style.display = '';
+        if (clearBtn) clearBtn.style.display = '';
+        countEl.innerText = count;
+        const col = COLUMNS[cellRangeSelection.segments[0].colIdx];
+        btn.title = `Copiar ${count} celda(s) de ${col ? col.label : ''} (Ctrl+C también funciona)`;
+      } else {
+        btn.style.display = 'none';
+        if (clearBtn) clearBtn.style.display = 'none';
+      }
+    }
+    // ============ fin selección de rango de celdas ============
+
     function handleCellClick(e, rowIdx, colIdx) {
+      if (suppressNextCellTextClick) { suppressNextCellTextClick = false; return; }
       if (isEditingCell) commitCellEdit();
       activeRowIndex = rowIdx;
       activeColIndex = colIdx;
@@ -2448,6 +2592,10 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     
     function copySelectedToClipboard() {
+      if (cellRangeSelection.segments.length > 0) {
+        copyCellRangeSelection();
+        return;
+      }
       if (selectedRowIds.size === 0) {
         const cell = document.getElementById(`cell-${activeRowIndex}-${activeColIndex}`);
         if (cell) {
@@ -2515,6 +2663,9 @@ HTML_CONTENT = """<!DOCTYPE html>
             e.preventDefault();
             saveActiveCellValue('');
           }
+        } else if (e.key === 'Escape' && cellRangeSelection.segments.length > 0) {
+          e.preventDefault();
+          clearCellRangeSelection();
         } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
           e.preventDefault();
           copySelectedToClipboard();
@@ -3044,6 +3195,7 @@ function exportCsv() {
         updateSelectCount();
       }
     });
+    window.addEventListener('mouseup', finalizeCellRangeDrag);
 
     const tableBodyElem = document.getElementById('table-body');
     if (tableBodyElem) {
