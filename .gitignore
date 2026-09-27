@@ -49,6 +49,7 @@ env/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+tests/*.png
 
 # IDE & OS
 .idea/

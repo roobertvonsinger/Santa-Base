@@ -8,9 +8,15 @@
 
 ## 📌 Contexto Inmediato
 - El visor de 4.89M registros ya cuenta con orden jerárquico (`SELECTION` | `CURP` | `RFC` | `NOMBRE` | `ESTADO` | `CIUDAD` | `CP` | `DIRECCIÓN` | `LÍMITE` | `RESTO`), rescate y contraste de fecha de nacimiento dentro del RFC, multiselección con `Ctrl` / `Shift` / arrastre, tiradores de resize de columnas en Excel, y exportación TSV matricial.
-- **Design System de Tokens (Auditoría UI Resuelta)**: Tipografía escalada a 13px base / 12.5px mono, celdas de 36px con padding `6px 10px`, segmented control unificado para filtros predefinidos, toolbar en 4 clusters, micro-tarjetas KPI con jerarquía visual y sistema semántico de color de 3 niveles (desbloqueo/búsqueda en Primario `#0284c7`, peligro confinado a logout).
+- **Design System de Tokens (Auditoría UI Resuelta)**: Tipografía escalada a 13px base / 12.5px mono, celdas de 36px con padding `6px 10px`, segmented control unificado para filtros predefinidos, toolbar en 4 clusters, micro-tarjetas KPI con jerarquía visual y sistema semántico de color de 3 niveles.
+- **Integración Parches Claude + Fase 2**:
+  - Selección de rango vertical de celdas por arrastre y `Ctrl` + arrastre multi-segmento con botón y atajo de copia rápida.
+  - Wordmark branding `SANTA 🙏🏻 BASE` en Top Bar y Lock Screen.
+  - Buscador global ergonómico con botón de limpieza instantánea `✕` y atajo universal `Ctrl+K`.
+  - Menú contextual estilo acrílico con atajos visuales, detección de colisión con los bordes de la ventana y acción directa de copia de rango.
+  - Reglas de diseño responsive que eliminan traslapes en cualquier resolución (pantallas medianas y compactas).
 - **Rendimiento SQLite**: Mapeo en RAM (`mmap_size = 2GB`), WAL activo e índice funcional `idx_santander_licrea_int` logrando ordenamiento numérico en **0.55 ms**.
-- **Pruebas Automatizadas**: 6/6 tests en verde (`pytest tests/`) incluyendo validación unitaria de tokens y test visual interactivo en Chromium con Playwright.
+- **Pruebas Automatizadas**: 7/7 tests en verde (`pytest tests/`), incluyendo suite de tokens, suite de fase 2 y validación visual interactiva en Chromium con Playwright.
 
 ---
 
