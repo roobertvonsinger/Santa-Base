@@ -95,12 +95,12 @@ async def test_ui():
         assert await btn_login.is_visible()
         btn_bg = await btn_login.evaluate("el => window.getComputedStyle(el).backgroundColor")
         print(f"btn-login background-color: {btn_bg}")
-        assert "rgb(2, 132, 199)" in btn_bg or "rgb(2, 132, 199)" in btn_bg.replace(" ", "")
+        assert "rgb(236, 0, 0)" in btn_bg or "rgb(236,0,0)" in btn_bg.replace(" ", "")
 
         # Test login
         await page.fill("#login-password", "Santabase")
         await page.click(".btn-login")
-        await page.wait_for_timeout(600)
+        await page.wait_for_timeout(1100)
 
         # Verify Lock screen is hidden
         lock_screen = page.locator("#lock-screen")

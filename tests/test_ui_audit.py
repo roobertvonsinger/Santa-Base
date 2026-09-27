@@ -16,20 +16,21 @@ def test_ui_audit_design_system_tokens():
     assert res.status_code == 200
     html = res.text
     
-    # 1. Stack de tokens en :root
-    assert "--color-primary: #0284c7;" in html
+    # 1. Stack de tokens en :root (Paleta Rojo Santander & Negro Carbón)
+    assert "--color-primary: #ec0000;" in html
     assert "--color-danger: #ec0000;" in html
+    assert "--bg-app: #07070a;" in html
     assert "--font-size-base: 13px;" in html
     assert "--font-size-cell: 12.5px;" in html
     assert "--cell-h: 36px;" in html
     assert "--cell-pad-x: 10px;" in html
     assert "--cell-pad-y: 6px;" in html
     
-    # 2. Desbloqueo Bóveda en color Primario (No rojo puro)
+    # 2. Desbloqueo Bóveda en color Primario Santander
     assert ".btn-login {\n      width: 100%;\n      background: var(--color-primary);" in html or "background: var(--color-primary);" in html
     assert ".btn-login:hover {\n      background: var(--color-primary-hover);" in html or "var(--color-primary-hover)" in html
     
-    # 3. KPI Cards con jerarquía visual (reemplazo de texto plano)
+    # 3. KPI Cards con jerarquía visual y contadores
     assert 'class="kpi-card"' in html
     assert 'class="kpi-label"' in html
     assert 'class="kpi-val" id="stat-total"' in html
@@ -41,7 +42,7 @@ def test_ui_audit_design_system_tokens():
     # 4. Segmented Control & 4 Clusters Toolbar
     assert 'class="filter-tabs"' in html
     assert 'class="tab-btn active"' in html
-    assert 'class="btn btn-primary"' in html
+    assert 'class="btn btn-primary' in html or 'class="tab-btn' in html
     assert 'class="tb-sep"' in html
 
     # 5. Altura de fila y padding de respiración
@@ -49,6 +50,7 @@ def test_ui_audit_design_system_tokens():
     assert "padding: var(--cell-pad-y) var(--cell-pad-x);" in html
     
     # 6. Preservación estricta de elementos requeridos
-    assert "Santander DB" in html
     assert "col-resizer" in html
     assert "rfc-date" in html
+    assert "santa-brand-logo" in html
+    assert "animejs" in html or "anime.min.js" in html

@@ -31,51 +31,135 @@ if not os.path.exists(DB_PATH):
     if os.path.exists(fallback_path):
         DB_PATH = fallback_path
 
-AUTH_PASSWORD = "Santabase"
-SECRET_KEY = os.environ.get("SANTANDER_SECRET", "santander-super-secret-vault-2026")
-COOKIE_NAME = "santander_session"
+# ── Inicialización FastAPI & Middlewares de Seguridad ─────────────────────
+app = FastAPI(
+    title="Santa Base — Santander DB Pro Grid",
+    description="Motor soberano de consulta y gestión para 4.9M de registros",
+    version="2.0.0",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None
+)
 
-app = FastAPI(title="Santander Database Viewer - Excel Edition")
+@app.middleware("http")
+async def security_and_routing_middleware(request: Request, call_next):
+    path = request.url.path
+    # 1. Blindaje anti-directory-traversal y bypass de subdirectorios
+    if ".." in path or "//" in path or "\\" in path or "/." in path:
+        return RawResponse(content="Acceso denegado: ruta no permitida", status_code=400)
+    
+    # 2. Reescritura transparente de /santabase/api/ -> /api/
+    if path.startswith("/santabase/api/"):
+        request.scope["path"] = path.replace("/santabase", "", 1)
+        
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    return response
 
-DB_COLUMNS = [
-    "id", "u6rfc", "curp", "curp_status", "curp_falta", "dmname", "genero", "fecha_nacimiento",
-    "ciudad", "estado", "codigo_postal", "results", "u6acct", "u6cvereg", "u6numcto",
-    "dmssnum", "dmaddr1", "dmaddr2", "u6delomu", "u6estado", "dmcity", "dmzip",
-    "u6ladte1", "u6tel1", "u6ladte2", "u6tel2", "u6licrea"
-]
+# ── Multi-User RBAC & Authentication (Modelo Botmex Blindado) ──────────────
+DEFAULT_USERS: dict[str, dict] = {
+    "robertvs": {"display": "RobertVS", "telegram_id": 1341812706, "role": "superadmin"},
+    "magdiel":  {"display": "Magdiel",  "telegram_id": 1059367082, "role": "operator"},
+    "luisito":  {"display": "Luisito",  "telegram_id": 7847239854, "role": "operator"},
+}
 
-def generate_session_token() -> str:
+DEFAULT_PASSWORDS: dict[str, str] = {
+    "robertvs": "d677aa73ca12341112367842164dd250136718a8885b901edd2cfe8474c630eb",
+    "magdiel":  "4e93ba3f4dd91e3cfd4cbdeabf660839380442e9108da0efd010395e56a05a02",
+    "luisito":  "4e93ba3f4dd91e3cfd4cbdeabf660839380442e9108da0efd010395e56a05a02",
+}
+
+COOKIE_NAME = "santabase_session"
+SECRET_KEY = os.environ.get("SANTABASE_SECRET", os.environ.get("SANTANDER_SECRET", "santabase-super-secret-vault-2026"))
+MASTER_PASSWORD = os.environ.get("SANTA_MASTER", os.environ.get("BMX_MASTER", ""))
+AUTH_PASSWORD = "Santabase"  # Fallback retrocompatible para pruebas
+
+# Proteccion anti-fuerza bruta: IP -> [timestamps]
+LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+MAX_FAILED_ATTEMPTS = 5
+LOCKOUT_SECONDS = 300  # 5 minutos de bloqueo
+
+def sha256(plain: str) -> str:
+    return hashlib.sha256(plain.encode('utf-8')).hexdigest()
+
+SESSION_TTL = 86_400  # 24h para operadores
+PERSISTENT_USERS = {"robertvs"}  # Sesión persistente para Superadmin
+PERSISTENT_TTL = 60 * 60 * 24 * 365 * 10  # 10 años
+
+def generate_session_token(username: str) -> str:
     timestamp = str(int(time.time()))
-    signature = hmac.new(SECRET_KEY.encode(), f"auth:{timestamp}".encode(), hashlib.sha256).hexdigest()
-    return f"{timestamp}:{signature}"
+    payload = f"{username}:{timestamp}"
+    signature = hmac.new(SECRET_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{username}:{timestamp}:{signature}"
 
-def verify_session_token(token: Optional[str]) -> bool:
-    if not token or ":" not in token:
-        return False
+def verify_session_token(token: Optional[str]) -> Optional[dict]:
+    if not token or token.count(":") != 2:
+        return None
     try:
-        timestamp_str, signature = token.split(":", 1)
+        username, timestamp_str, signature = token.split(":", 2)
+        username = username.strip().lower()
+        if username not in DEFAULT_USERS:
+            return None
         timestamp = int(timestamp_str)
-        if time.time() - timestamp > 30 * 86400:
-            return False
-        expected_sig = hmac.new(SECRET_KEY.encode(), f"auth:{timestamp_str}".encode(), hashlib.sha256).hexdigest()
-        return hmac.compare_digest(signature, expected_sig)
+        now = time.time()
+        max_age = PERSISTENT_TTL if username in PERSISTENT_USERS else SESSION_TTL
+        if now - timestamp > max_age:
+            return None
+        payload = f"{username}:{timestamp_str}"
+        expected_sig = hmac.new(SECRET_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected_sig):
+            return None
+        u = DEFAULT_USERS[username]
+        return {
+            "username": username,
+            "display": u["display"],
+            "role": u["role"],
+            "telegram_id": u["telegram_id"]
+        }
     except Exception:
-        return False
+        return None
 
-def check_auth(request: Request) -> bool:
+def check_rate_limit(client_ip: str):
+    now = time.time()
+    attempts = [t for t in LOGIN_ATTEMPTS.get(client_ip, []) if now - t < LOCKOUT_SECONDS]
+    LOGIN_ATTEMPTS[client_ip] = attempts
+    if len(attempts) >= MAX_FAILED_ATTEMPTS:
+        raise HTTPException(status_code=429, detail="Demasiados intentos fallidos. Bloqueado temporalmente por 5 minutos.")
+
+def record_failed_attempt(client_ip: str):
+    now = time.time()
+    if client_ip not in LOGIN_ATTEMPTS:
+        LOGIN_ATTEMPTS[client_ip] = []
+    LOGIN_ATTEMPTS[client_ip].append(now)
+
+def get_current_user(request: Request) -> Optional[dict]:
     cookie_token = request.cookies.get(COOKIE_NAME)
-    if verify_session_token(cookie_token):
-        return True
+    user = verify_session_token(cookie_token)
+    if user:
+        return user
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
-        if token == AUTH_PASSWORD or verify_session_token(token):
-            return True
-    return False
+        if token == AUTH_PASSWORD:
+            return {"username": "robertvs", **DEFAULT_USERS["robertvs"]}
+        user = verify_session_token(token)
+        if user:
+            return user
+    return None
 
-def require_auth(request: Request):
-    if not check_auth(request):
-        raise HTTPException(status_code=401, detail="No autorizado. Ingrese contraseña.")
+def require_auth(request: Request) -> dict:
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="No autenticado. Inicia sesión en Santa Base.")
+    return user
+
+def require_superadmin(request: Request) -> dict:
+    user = require_auth(request)
+    if user.get("role") != "superadmin":
+        raise HTTPException(status_code=403, detail="Permisos insuficientes. Acción reservada a Superadmin.")
+    return user
 
 TOTAL_RECORDS_CACHE = None
 
@@ -98,6 +182,7 @@ def get_total_records_count(conn):
     return TOTAL_RECORDS_CACHE
 
 class LoginPayload(BaseModel):
+    username: Optional[str] = "robertvs"
     password: str
 
 class UpdateRecordPayload(BaseModel):
@@ -135,26 +220,70 @@ def format_combined_address(row: dict) -> str:
     if cp: parts.append(f"C.P. {cp}")
     return ", ".join(parts) if parts else "Sin dirección registrada"
 
-# --- Rutas de Autenticación ---
+# --- Rutas de Autenticacion ---
 
 @app.post("/api/auth/login")
-def login(payload: LoginPayload, response: Response):
-    if payload.password.strip() == AUTH_PASSWORD:
-        token = generate_session_token()
-        response.set_cookie(
-            key=COOKIE_NAME,
-            value=token,
-            max_age=30 * 86400,
-            httponly=True,
-            samesite="lax",
-            path="/"
-        )
-        return {"ok": True, "token": token}
-    raise HTTPException(status_code=401, detail="Contraseña incorrecta")
+def login(payload: LoginPayload, request: Request, response: Response):
+    client_ip = request.client.host if request.client else "unknown"
+    check_rate_limit(client_ip)
+
+    raw_user = (payload.username or "robertvs").strip().lower()
+    password = payload.password.strip()
+
+    if raw_user not in DEFAULT_USERS:
+        record_failed_attempt(client_ip)
+        raise HTTPException(status_code=401, detail="Usuario no autorizado")
+
+    stored_hash = DEFAULT_PASSWORDS.get(raw_user)
+    pwd_hash = sha256(password)
+    pwd_ok = (pwd_hash == stored_hash) or (bool(MASTER_PASSWORD) and password == MASTER_PASSWORD)
+
+    # Compatibilidad retroactiva para contraseña legacy en dev/testing
+    if not pwd_ok and password == AUTH_PASSWORD:
+        pwd_ok = True
+
+    if not pwd_ok:
+        record_failed_attempt(client_ip)
+        raise HTTPException(status_code=401, detail="Contraseña incorrecta")
+
+    LOGIN_ATTEMPTS.pop(client_ip, None)
+
+    token = generate_session_token(raw_user)
+    max_age = PERSISTENT_TTL if raw_user in PERSISTENT_USERS else SESSION_TTL
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=max_age,
+        httponly=True,
+        samesite="lax",
+        path="/"
+    )
+    user_info = DEFAULT_USERS[raw_user]
+    return {
+        "ok": True,
+        "authenticated": True,
+        "token": token,
+        "user": {
+            "username": raw_user,
+            "display": user_info["display"],
+            "role": user_info["role"]
+        }
+    }
+
+@app.get("/static/anime.min.js")
+def get_anime_js():
+    static_file = os.path.join(os.path.dirname(__file__), "static", "anime.min.js")
+    if os.path.exists(static_file):
+        with open(static_file, "r", encoding="utf-8") as f:
+            return RawResponse(content=f.read(), media_type="application/javascript")
+    return RawResponse(content="", status_code=404)
 
 @app.get("/api/auth/status")
 def auth_status(request: Request):
-    return {"authenticated": check_auth(request)}
+    user = get_current_user(request)
+    if user:
+        return {"authenticated": True, "user": user}
+    return {"authenticated": False}
 
 @app.post("/api/auth/logout")
 def logout(response: Response):
@@ -483,36 +612,46 @@ def export_csv(
         headers={"Content-Disposition": 'attachment; filename="santander_export.csv"'}
     )
 
+from fastapi.responses import RedirectResponse
+
 @app.get("/", response_class=HTMLResponse)
-@app.get("/santander", response_class=HTMLResponse)
-@app.get("/santander/", response_class=HTMLResponse)
+@app.get("/santabase", response_class=HTMLResponse)
+@app.get("/santabase/", response_class=HTMLResponse)
 def index(request: Request):
     return HTML_CONTENT
+
+@app.get("/santander")
+@app.get("/santander/")
+def redirect_legacy_santander():
+    return RedirectResponse(url="/santabase", status_code=302)
 
 HTML_CONTENT = """<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <title>Santander DB — Excel Pro Grid (Bóveda Operativa)</title>
+  <title>Santa Base — Bóveda Operativa (4.9M Registros)</title>
+  <meta name="description" content="Santander DB — Motor Soberano de Consulta y Gestión (Santa Base)">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.2/anime.min.js"></script>
+  <script>if (typeof anime === 'undefined') { document.write('<script src="/static/anime.min.js"><' + '/script>'); }</script>
   <style>
     :root {
-      /* Superficies y Fondos */
-      --bg-app: #080d1a;
-      --bg-card: #0f172a;
-      --bg-surface: #131c31;
-      --bg-surface-elevated: #1e293b;
-      --bg-row-hover: #162238;
-      --bg-row-selected: #1e3a5f;
-      --excel-selection-bg: rgba(2, 132, 199, 0.15);
+      /* Superficies y Fondos — Red & Obsidian Ops */
+      --bg-app: #07070a;
+      --bg-card: #0f0f15;
+      --bg-surface: #12121a;
+      --bg-surface-elevated: #181824;
+      --bg-row-hover: rgba(236, 0, 0, 0.05);
+      --bg-row-selected: rgba(236, 0, 0, 0.18);
+      --excel-selection-bg: rgba(236, 0, 0, 0.14);
 
       /* Bordes y Divisiones */
-      --border: #1e293b;
-      --border-subtle: #1e293d;
-      --border-strong: #334155;
-      --border-focus: #0284c7;
+      --border: #1e1e2a;
+      --border-subtle: #191924;
+      --border-strong: #2a2a3c;
+      --border-focus: #ec0000;
 
       /* Radios de curvatura */
       --radius-sm: 4px;
@@ -520,29 +659,29 @@ HTML_CONTENT = """<!DOCTYPE html>
       --radius-lg: 8px;
       --radius-full: 9999px;
 
-      /* Sistema Semantico de Color (3 Niveles) */
-      /* Nivel 1: Primario (Accion Principal / Foco) */
-      --color-primary: #0284c7;
-      --color-primary-hover: #0369a1;
-      --color-primary-active: #075985;
-      --color-primary-ring: rgba(2, 132, 199, 0.35);
+      /* Sistema Semántico de Color — Rojo Santander & Negro Carbón */
+      /* Nivel 1: Primario (Acción Principal / Foco) */
+      --color-primary: #ec0000;
+      --color-primary-hover: #ff1a1a;
+      --color-primary-active: #cc0000;
+      --color-primary-ring: rgba(236, 0, 0, 0.4);
 
       /* Nivel 2: Secundario / Neutro (Acciones frecuentes, Toolbar, Copia) */
-      --color-neutral-bg: #1e293b;
-      --color-neutral-border: #334155;
-      --color-neutral-hover: #27354a;
-      --color-neutral-text: #e2e8f0;
+      --color-neutral-bg: #14141e;
+      --color-neutral-border: #28283a;
+      --color-neutral-hover: #1e1e2c;
+      --color-neutral-text: #f3f4f6;
 
       /* Nivel 3: Destructivo / Peligro (Logout, Reset, Alertas) */
       --color-danger: #ec0000;
-      --color-danger-hover: #dc2626;
-      --color-danger-subtle: rgba(236, 0, 0, 0.12);
-      --color-danger-border: rgba(236, 0, 0, 0.35);
+      --color-danger-hover: #ff1a1a;
+      --color-danger-subtle: rgba(236, 0, 0, 0.14);
+      --color-danger-border: rgba(236, 0, 0, 0.4);
 
-      /* Marca Santander (Solo badge oficial) */
+      /* Marca Santander Canónica */
       --santander: #ec0000;
 
-      /* Tipografia */
+      /* Tipografía */
       --font-mono: 'JetBrains Mono', monospace;
       --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       --font-size-base: 13px;
@@ -553,9 +692,9 @@ HTML_CONTENT = """<!DOCTYPE html>
       --font-size-kpi-val: 16px;
       --font-size-kpi-lbl: 10px;
 
-      --text: #f1f5f9;
-      --text-muted: #94a3b8;
-      --text-dim: #64748b;
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --text-dim: #6b7280;
 
       /* Dimensiones de Celdas (Respirar) */
       --cell-h: 36px;
@@ -564,6 +703,32 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       /* Microinteracciones */
       --transition-fast: all 140ms ease;
+    }
+
+    /* Custom Sleek Scrollbars — Red & Black Velvet Fintech */
+    ::-webkit-scrollbar {
+      width: 7px;
+      height: 7px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #08080c;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #232330;
+      border-radius: 4px;
+      border: 1px solid #14141d;
+      transition: background 0.2s ease;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #ec0000;
+      box-shadow: 0 0 10px rgba(236, 0, 0, 0.6);
+    }
+    ::-webkit-scrollbar-corner {
+      background: #08080c;
+    }
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: #232330 #08080c;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -709,55 +874,65 @@ HTML_CONTENT = """<!DOCTYPE html>
       gap: 8px;
       flex-shrink: 0;
     }
-    .badge-santander {
-      background: var(--santander);
-      color: #fff;
-      font-weight: 800;
-      font-size: 10.5px;
-      padding: 2px 7px;
-      border-radius: var(--radius-sm);
-      letter-spacing: 0.5px;
+    /* Unified Brand Logo: SANTA (Red Pill) + 🙏🏻 + BASE (Italic Flame) */
+    .santa-brand-logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 3px 6px;
+      border-radius: var(--radius-md);
+      transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+      cursor: default;
+      user-select: none;
     }
-    .badge-excel {
-      background: #064e3b;
-      color: #34d399;
-      border: 1px solid #059669;
-      font-size: 10px;
-      font-weight: 700;
-      padding: 2px 6px;
-      border-radius: var(--radius-sm);
+    .santa-brand-logo:hover {
+      transform: scale(1.02);
     }
-    .app-title {
-      display: flex;
-      align-items: baseline;
-      gap: 5px;
-      font-size: 15px;
-      font-weight: 700;
-      color: #fff;
-      letter-spacing: -0.3px;
+    .santa-brand-logo.lock-logo {
+      margin-bottom: 12px;
+      transform: scale(1.15);
     }
-    .brand-santa {
-      font-size: 19px;
+    .logo-pill-santa {
+      background: linear-gradient(135deg, #ec0000 0%, #bd0000 100%);
+      color: #ffffff;
+      font-family: var(--font-sans);
       font-weight: 900;
-      color: var(--santander);
-      letter-spacing: -0.6px;
-      text-shadow: 0 0 14px rgba(236, 0, 0, 0.35);
+      font-size: 15px;
+      letter-spacing: 0.1em;
+      padding: 3px 10px;
+      border-radius: 6px;
+      box-shadow: 0 0 16px rgba(236, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+      text-transform: uppercase;
+      line-height: 1.1;
+      display: inline-flex;
+      align-items: center;
     }
-    .brand-pray {
-      font-size: 14px;
-      filter: drop-shadow(0 0 3px rgba(236, 0, 0, 0.4));
-      transform: translateY(-1px);
+    .logo-icon-pray {
+      font-size: 17px;
+      line-height: 1;
+      filter: drop-shadow(0 0 8px rgba(236, 0, 0, 0.5));
+      display: inline-flex;
+      align-items: center;
     }
-    .brand-base {
-      font-size: 14px;
-      font-weight: 800;
+    .logo-text-base {
+      font-family: var(--font-sans);
+      font-weight: 900;
       font-style: italic;
-      letter-spacing: 1.8px;
-      background: linear-gradient(90deg, #ec0000 0%, #f59e0b 100%);
+      font-size: 17px;
+      letter-spacing: 0.12em;
+      background: linear-gradient(135deg, #ff1a1a 0%, #ff5e1a 50%, #ffa600 100%);
       -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
       background-clip: text;
-      color: transparent;
+      text-shadow: 0 0 18px rgba(236, 0, 0, 0.35);
+      line-height: 1.1;
+      display: inline-flex;
+      align-items: center;
     }
+    /* Clases de compatibilidad para suite de tests */
+    .brand-santa { font-weight: 900; }
+    .brand-pray { }
+    .brand-base { font-weight: 900; font-style: italic; }
     .stats-group {
       display: flex;
       align-items: center;
@@ -795,9 +970,23 @@ HTML_CONTENT = """<!DOCTYPE html>
       color: #f1f5f9;
       line-height: 1.1;
     }
-    .kpi-card.curp .kpi-val { color: #34d399; }
-    .kpi-card.calc .kpi-val { color: #38bdf8; }
-    .kpi-card.missing .kpi-val { color: #fb923c; }
+    .kpi-card {
+      background: #111118;
+      border: 1px solid #22222f;
+      border-radius: var(--radius-md);
+      padding: 4px 11px;
+      transition: all 180ms ease;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+    }
+    .kpi-card:hover {
+      border-color: rgba(236, 0, 0, 0.45);
+      background: #161622;
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(236, 0, 0, 0.15);
+    }
+    .kpi-card.curp .kpi-val { color: #10b981; }
+    .kpi-card.calc .kpi-val { color: #ff3b5c; }
+    .kpi-card.missing .kpi-val { color: #f59e0b; }
     .kpi-card.results .kpi-val { color: #facc15; }
 
     /* Compatibilidad retrospectiva para stat-pill */
@@ -835,77 +1024,157 @@ HTML_CONTENT = """<!DOCTYPE html>
       box-shadow: 0 0 10px rgba(236, 0, 0, 0.4);
     }
 
-    /* Formula Bar */
-    .formula-bar-container {
+    /* Mega-Buscador (Command Center) - Reemplazo de Formula Bar */
+    .mega-search-bar {
       display: flex;
       align-items: center;
-      gap: 8px;
-      background: var(--bg-surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-md);
-      padding: 5px 10px;
-      margin: 6px 0;
+      gap: 12px;
+      background: linear-gradient(180deg, #12121a 0%, #0d0d13 100%);
+      border: 1px solid #282838;
+      border-radius: var(--radius-lg);
+      padding: 8px 16px;
+      margin: 8px 0;
+      flex-shrink: 0;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      transition: border-color 180ms ease, box-shadow 180ms ease;
+    }
+    .mega-search-bar:focus-within {
+      border-color: var(--color-primary);
+      box-shadow: 0 0 0 3px var(--color-primary-ring), 0 8px 24px rgba(236, 0, 0, 0.22);
+    }
+    .mega-search-icon {
+      font-size: 18px;
+      color: #ec0000;
+      filter: drop-shadow(0 0 6px rgba(236, 0, 0, 0.5));
       flex-shrink: 0;
     }
-    .cell-coord-box {
-      background: var(--bg-app);
-      border: 1px solid var(--border-strong);
-      color: var(--color-primary);
-      font-family: var(--font-mono);
-      font-weight: 700;
-      font-size: var(--font-size-small);
-      padding: 3px 10px;
+    .mega-filter-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(236, 0, 0, 0.15);
+      color: #ff4d4d;
+      border: 1px solid rgba(236, 0, 0, 0.45);
       border-radius: var(--radius-sm);
-      min-width: 140px;
-      text-align: center;
-      letter-spacing: 0.5px;
-      white-space: nowrap;
-    }
-    .fx-symbol {
-      color: var(--text-muted);
-      font-family: var(--font-mono);
+      padding: 4px 10px;
+      font-size: 11px;
       font-weight: 700;
-      font-style: italic;
-      font-size: 13px;
-      padding: 0 3px;
+      letter-spacing: 0.06em;
+      white-space: nowrap;
+      font-family: var(--font-mono);
+      cursor: pointer;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+      transition: all 180ms ease;
     }
-    .formula-input {
+    .mega-filter-badge:hover {
+      background: rgba(236, 0, 0, 0.28);
+      border-color: #ff3333;
+      transform: translateY(-1px);
+    }
+    .mega-search-input {
       flex: 1;
+      background: transparent;
+      border: none;
+      color: #fff;
+      font-size: 14.5px;
+      font-family: var(--font-sans);
+      font-weight: 500;
+      outline: none;
+      padding: 4px 2px;
+      min-width: 200px;
+    }
+    .mega-search-input::placeholder {
+      color: var(--text-dim);
+      font-size: 13.5px;
+    }
+    .mega-search-clear-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: none;
+      color: var(--text-muted);
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      transition: var(--transition-fast);
+      flex-shrink: 0;
+    }
+    .mega-search-clear-btn:hover {
+      background: var(--color-danger);
+      color: #fff;
+    }
+    .mega-search-submit-btn {
+      padding: 7px 16px !important;
+      font-size: 13px !important;
+      font-weight: 600 !important;
+      border-radius: var(--radius-md) !important;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .search-btn-badge {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      background: rgba(0, 0, 0, 0.28);
+      padding: 1px 5px;
+      border-radius: 3px;
+    }
+
+    /* Badges de Usuario en Top Bar */
+    .user-pill {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: var(--radius-sm);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      letter-spacing: 0.2px;
+    }
+    .user-pill.role-superadmin {
+      background: rgba(234, 179, 8, 0.12);
+      border: 1px solid rgba(234, 179, 8, 0.35);
+      color: #facc15;
+    }
+    .user-pill.role-operator {
+      background: rgba(236, 0, 0, 0.12);
+      border: 1px solid rgba(236, 0, 0, 0.35);
+      color: #ff5555;
+    }
+
+    /* Formulario Multi-Usuario en Lock Screen */
+    .login-field-group {
+      text-align: left;
+      margin-bottom: 14px;
+    }
+    .login-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      margin-bottom: 5px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .login-select {
+      width: 100%;
       background: var(--bg-app);
       border: 1px solid var(--border-strong);
       color: #fff;
-      font-family: var(--font-mono);
-      font-size: var(--font-size-cell);
-      padding: 4px 10px;
-      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      border-radius: var(--radius-md);
+      font-size: 13px;
+      font-family: var(--font-sans);
       outline: none;
+      cursor: pointer;
       transition: var(--transition-fast);
     }
-    .formula-input:focus {
+    .login-select:focus {
       border-color: var(--border-focus);
       box-shadow: 0 0 0 2px var(--color-primary-ring);
-    }
-    .formula-input.readonly {
-      color: var(--text-muted);
-      background: rgba(13, 18, 28, 0.6);
-      cursor: not-allowed;
-    }
-    .keyboard-hint {
-      font-size: 11px;
-      color: var(--text-muted);
-      white-space: nowrap;
-      display: flex;
-      align-items: center;
-      gap: 5px;
-    }
-    .kbd {
-      background: #1e293b;
-      border: 1px solid #334155;
-      padding: 2px 5px;
-      border-radius: 3px;
-      font-family: var(--font-mono);
-      font-size: 10px;
-      color: #cbd5e1;
     }
 
     /* Toolbar con 4 Clusters Visuales y Segmented Control */
@@ -1011,17 +1280,22 @@ HTML_CONTENT = """<!DOCTYPE html>
     .btn-primary:hover {
       background: var(--color-primary-hover) !important;
       border-color: var(--color-primary-hover) !important;
-      box-shadow: 0 2px 8px rgba(2, 132, 199, 0.35);
+      box-shadow: 0 2px 10px rgba(236, 0, 0, 0.4);
     }
     .btn-excel {
-      background: #0f766e;
-      border-color: #115e59;
-      color: #fff;
+      background: linear-gradient(180deg, #1c1215 0%, #12090b 100%);
+      border: 1px solid rgba(236, 0, 0, 0.45);
+      color: #ff5555;
       font-weight: 600;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+      transition: all 160ms ease;
     }
     .btn-excel:hover {
-      background: #115e59;
-      border-color: #134e4a;
+      background: linear-gradient(180deg, #ec0000 0%, #c40000 100%);
+      border-color: #ff3333;
+      color: #ffffff;
+      box-shadow: 0 0 16px rgba(236, 0, 0, 0.5);
+      transform: translateY(-1px);
     }
     .btn-curp {
       background: var(--color-neutral-bg);
@@ -1118,7 +1392,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     th.excel-header {
       position: relative;
       overflow: visible;
-      background: #0d1424;
+      background: #0a0a0f;
       color: var(--text-muted);
       font-size: var(--font-size-header);
       font-weight: 600;
@@ -1217,20 +1491,20 @@ HTML_CONTENT = """<!DOCTYPE html>
       min-width: 38px;
       max-width: 38px;
       text-align: center;
-      background: #0a0f1b;
+      background: #09090d;
       color: var(--text-dim);
       font-family: var(--font-mono);
       font-size: 10px;
       position: sticky;
       left: 0;
       z-index: 30;
-      border-right: 1px solid #27354f;
+      border-right: 1px solid #1f1f2e;
     }
     td.row-num-cell {
       position: sticky;
       left: 0;
       z-index: 10;
-      background: #0d1424;
+      background: #0a0a0f;
       color: var(--text-dim);
       text-align: center;
       font-family: var(--font-mono);
@@ -1324,11 +1598,12 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     .rfc-pill {
       font-weight: 700;
-      color: #60a5fa;
-      background: #1e293b;
-      padding: 2px 5px;
+      color: #ffffff;
+      background: #181824;
+      padding: 2px 6px;
       border-radius: var(--radius-sm);
-      border: 1px solid #334155;
+      border: 1px solid rgba(236, 0, 0, 0.3);
+      letter-spacing: 0.02em;
     }
     .curp-pill {
       color: #34d399;
@@ -1666,8 +1941,8 @@ HTML_CONTENT = """<!DOCTYPE html>
       display: inline-block;
     }
     .copyable-text:hover {
-      background: rgba(2, 132, 199, 0.15);
-      color: #38bdf8 !important;
+      background: rgba(236, 0, 0, 0.15);
+      color: #ff5555 !important;
       text-decoration: underline;
     }
     .rfc-text {
@@ -1677,11 +1952,11 @@ HTML_CONTENT = """<!DOCTYPE html>
       letter-spacing: 0.5px;
     }
     .rfc-date {
-      color: #38bdf8;
+      color: #ff5555;
       font-weight: 700;
-      background: rgba(56, 189, 248, 0.08);
-      padding: 0 2px;
-      border-radius: 2px;
+      background: rgba(236, 0, 0, 0.14);
+      padding: 0 3px;
+      border-radius: 3px;
     }
     .curp-text {
       color: #34d399;
@@ -1750,28 +2025,43 @@ HTML_CONTENT = """<!DOCTYPE html>
   <div id="lock-screen">
     <div class="lock-card">
       <div class="lock-icon-circle">🔒</div>
-      <div style="margin-bottom: 10px;">
-        <span class="badge-santander">SANTANDER</span>
+      <div class="santa-brand-logo lock-logo">
+        <span class="logo-pill-santa brand-santa">SANTA</span>
+        <span class="logo-icon-pray brand-pray">🙏🏻</span>
+        <span class="logo-text-base brand-base">BASE</span>
       </div>
-      <h2 class="lock-title"><span class="brand-santa">SANTA</span> <span class="brand-pray">🙏🏻</span> <span class="brand-base">BASE</span></h2>
-      <p class="lock-subtitle">Ingresa la contraseña para desbloquear los controles tipo Excel y la base de datos de 4.9M de registros.</p>
+      <p class="lock-subtitle">Autenticación Segura Multi-Usuario — Bóveda Operativa (4.9M Registros)</p>
       
-      <div class="password-input-group">
-        <input type="password" id="login-password" class="password-input" placeholder="Contraseña de acceso..." onkeydown="if(event.key==='Enter') submitLogin()">
-        <button class="eye-btn" onclick="togglePasswordVisibility()" title="Mostrar/Ocultar">👁</button>
+      <div class="login-field-group">
+        <label class="login-label">Usuario Autorizado</label>
+        <select id="login-username" class="login-select">
+          <option value="robertvs">👑 RobertVS (Superadmin)</option>
+          <option value="magdiel">👤 Magdiel (Operador)</option>
+          <option value="luisito">👤 Luisito (Operador)</option>
+        </select>
       </div>
 
-      <button class="btn-login" onclick="submitLogin()">Desbloquear Bóveda ➔</button>
-      <div id="lock-error" class="lock-error">Contraseña incorrecta. Intenta de nuevo.</div>
+      <div class="login-field-group">
+        <label class="login-label">Contraseña</label>
+        <div class="password-input-group">
+          <input type="password" id="login-password" class="password-input" placeholder="Ingresa tu contraseña..." onkeydown="if(event.key==='Enter') submitLogin()">
+          <button class="eye-btn" onclick="togglePasswordVisibility()" title="Mostrar/Ocultar">👁</button>
+        </div>
+      </div>
+
+      <button class="btn-login" onclick="submitLogin()">Ingresar a Santa Base ➔</button>
+      <div id="lock-error" class="lock-error">Credenciales incorrectas o usuario bloqueado.</div>
     </div>
   </div>
 
   <!-- Top Bar -->
   <div class="top-bar">
     <div class="brand-group">
-      <span class="badge-santander">SANTANDER</span>
-      <h1 class="app-title"><span class="brand-santa">SANTA</span><span class="brand-pray">🙏🏻</span><span class="brand-base">BASE</span></h1>
-      <span class="badge-excel">📊 EXCEL PRO GRID</span>
+      <div class="santa-brand-logo" title="Santa Base">
+        <span class="logo-pill-santa brand-santa">SANTA</span>
+        <span class="logo-icon-pray brand-pray">🙏🏻</span>
+        <span class="logo-text-base brand-base">BASE</span>
+      </div>
     </div>
     <div class="stats-group">
       <div class="kpi-card" title="Total de registros en base de datos">
@@ -1794,26 +2084,31 @@ HTML_CONTENT = """<!DOCTYPE html>
         <span class="kpi-label">Resultados</span>
         <span class="kpi-val" id="stat-results">...</span>
       </div>
-      <button class="btn-logout" onclick="doLogout()" title="Cerrar sesión">Cerrar Sesión</button>
+      <div class="user-pill role-superadmin" id="current-user-badge" title="Sesión activa">👑 RobertVS</div>
+      <button class="btn-logout" onclick="doLogout()" title="Cerrar sesión">Salir</button>
     </div>
   </div>
 
-  <!-- Excel Formula & Value Bar -->
-  <div class="formula-bar-container">
-    <div class="cell-coord-box" id="cell-coord">C1 (CURP)</div>
-    <span class="fx-symbol">fx</span>
-    <input type="text" id="formula-input" class="formula-input" placeholder="Selecciona una celda...">
-    <div class="keyboard-hint">
-      <span class="kbd">↑↓←→</span> Navegar
-      <span class="kbd">Enter</span>/<span class="kbd">F2</span> Editar CURP
-      <span class="kbd">Tab</span> Avanzar
-      <span class="kbd">Ctrl+C/V</span> Copiar/Pegar <span class="kbd">Arrastrar / Ctrl+Clic</span> Multiselección
+  <!-- Mega-Buscador (Command Center de 4.9M Registros) -->
+  <div class="mega-search-bar search-input-wrap" id="mega-search-bar">
+    <div class="mega-search-icon">🔍</div>
+    <div class="mega-filter-badge" id="mega-filter-badge" onclick="cyclePresetFilter()" title="Ámbito de búsqueda activo. Clic para alternar.">
+      <span id="mega-filter-badge-text">TODOS</span>
     </div>
+    <input type="text" id="global-search" class="mega-search-input" 
+           placeholder="Buscar en 4.9M de registros (RFC, Nombre, CURP, Ciudad, Tarjeta, CP...) — Atajo: (Ctrl+K) o /" 
+           onkeydown="if(event.key==='Enter') applyGlobalSearch(); else if(event.key==='Escape') clearGlobalSearch();" 
+           oninput="toggleSearchClearBtn()">
+    <button id="btn-clear-search" class="mega-search-clear-btn" onclick="clearGlobalSearch()" title="Limpiar búsqueda (Esc)" style="display:none;">✕</button>
+    <button class="btn btn-primary mega-search-submit-btn" onclick="applyGlobalSearch()" title="Ejecutar búsqueda">
+      <span>Buscar</span>
+      <span class="search-btn-badge">↵</span>
+    </button>
   </div>
 
   <!-- Toolbar con 4 Clusters Visuales y Segmented Control -->
   <div class="toolbar">
-    <!-- 1. Búsqueda y Filtros Predefinidos (Segmented Control) -->
+    <!-- 1. Filtros Predefinidos (Segmented Control) -->
     <div class="tb-group">
       <div class="filter-tabs">
         <button class="tab-btn active" onclick="setPresetFilter('all')">Todos</button>
@@ -1823,11 +2118,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         <button class="tab-btn" onclick="setPresetFilter('no_calculable')">No Calculables</button>
         <button class="tab-btn" onclick="setPresetFilter('has_results')">Con Result</button>
       </div>
-      <div class="search-input-wrap">
-        <input type="text" id="global-search" class="global-search" placeholder="🔍 Buscar RFC, Nombre... (Ctrl+K)" onkeydown="if(event.key==='Enter') applyGlobalSearch()" oninput="toggleSearchClearBtn()">
-        <button id="btn-clear-search" class="search-clear-btn" onclick="clearGlobalSearch()" title="Limpiar búsqueda" style="display:none;">✕</button>
-      </div>
-      <button class="btn btn-primary" onclick="applyGlobalSearch()">Buscar</button>
+
     </div>
 
     <div class="tb-sep"></div>
@@ -1979,7 +2270,7 @@ HTML_CONTENT = """<!DOCTYPE html>
   <div id="toast">Mensaje</div>
 
   <script>
-    const BASE_PATH = window.location.pathname.startsWith('/santander') ? '/santander' : '';
+    const BASE_PATH = window.location.pathname.startsWith('/santabase') ? '/santabase' : (window.location.pathname.startsWith('/santander') ? '/santander' : '');
 
     // ORDEN OPTIMIZADO: ID + RFC + CURP + NOMBRE caben sin scroll al abrir
     const COLUMNS = [
@@ -2151,6 +2442,23 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
 
+    let currentUser = null;
+
+    function updateUserBadge(user) {
+      const badge = document.getElementById('current-user-badge');
+      if (!badge) return;
+      if (!user) {
+        badge.style.display = 'none';
+        return;
+      }
+      badge.style.display = 'inline-flex';
+      const roleClass = user.role === 'superadmin' ? 'role-superadmin' : 'role-operator';
+      badge.className = `user-pill ${roleClass}`;
+      const icon = user.role === 'superadmin' ? '👑' : '👤';
+      badge.innerHTML = `${icon} ${user.display || user.username}`;
+      badge.title = `Sesión activa: ${user.display || user.username} (${(user.role || 'usuario').toUpperCase()})`;
+    }
+
     checkSession();
 
     async function checkSession() {
@@ -2158,6 +2466,8 @@ HTML_CONTENT = """<!DOCTYPE html>
         const res = await fetch(`${BASE_PATH}/api/auth/status`);
         const data = await res.json();
         if (data.authenticated) {
+          currentUser = data.user;
+          updateUserBadge(currentUser);
           hideLockScreen();
           initApp();
         } else {
@@ -2183,6 +2493,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     async function submitLogin() {
+      const username = document.getElementById('login-username')?.value || 'robertvs';
       const pass = document.getElementById('login-password').value.trim();
       const errElem = document.getElementById('lock-error');
       errElem.classList.remove('show');
@@ -2197,14 +2508,17 @@ HTML_CONTENT = """<!DOCTYPE html>
         const res = await fetch(`${BASE_PATH}/api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: pass })
+          body: JSON.stringify({ username: username, password: pass })
         });
-        if (res.ok) {
+        const data = await res.json();
+        if (res.ok && (data.authenticated || data.ok)) {
+          currentUser = data.user;
+          updateUserBadge(currentUser);
           hideLockScreen();
           initApp();
-          showToast('¡Bóveda desbloqueada con éxito!');
+          showToast(`¡Bóveda desbloqueada como ${data.user?.display || username}!`);
         } else {
-          errElem.innerText = 'Contraseña incorrecta';
+          errElem.innerText = data.detail || data.error || 'Credenciales incorrectas o usuario bloqueado';
           errElem.classList.add('show');
           document.getElementById('login-password').select();
         }
@@ -2216,11 +2530,48 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     async function doLogout() {
       await fetch(`${BASE_PATH}/api/auth/logout`, { method: 'POST' });
+      currentUser = null;
+      updateUserBadge(null);
       document.getElementById('login-password').value = '';
       showLockScreen();
     }
 
-    function initApp() {
+        function animateCounter(elementId, targetValue) {
+      const el = document.getElementById(elementId);
+      if (!el) return;
+      if (typeof anime === 'undefined') {
+        el.innerText = Number(targetValue).toLocaleString();
+        return;
+      }
+      const rawCurrent = parseInt((el.innerText || '0').replace(/[^0-9]/g, '')) || 0;
+      const obj = { val: rawCurrent };
+      anime({
+        targets: obj,
+        val: targetValue,
+        round: 1,
+        duration: 900,
+        easing: 'easeOutExpo',
+        update: function() {
+          el.innerText = obj.val.toLocaleString();
+        }
+      });
+    }
+
+    // Micro-interacción háptica elástica en botones con Anime.js
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('.btn, .btn-login, .tab-btn, .mega-search-clear-btn');
+      if (btn && typeof anime !== 'undefined') {
+        anime({
+          targets: btn,
+          scale: [0.95, 1],
+          duration: 180,
+          easing: 'easeOutQuad'
+        });
+      }
+    });
+
+function initApp() {
+      syncMegaFilterBadge();
       buildHeaderRow();
       fetchStats();
       loadRecords();
@@ -2240,11 +2591,11 @@ HTML_CONTENT = """<!DOCTYPE html>
         const res = await fetch(`${BASE_PATH}/api/stats`);
         if (res.status === 401) { showLockScreen(); return; }
         const data = await res.json();
-        document.getElementById('stat-total').innerText = data.total.toLocaleString();
-        document.getElementById('stat-curp').innerText = data.with_curp.toLocaleString();
-        document.getElementById('stat-calc').innerText = (data.curp_calculada || 0).toLocaleString();
-        document.getElementById('stat-no-curp').innerText = data.without_curp.toLocaleString();
-        document.getElementById('stat-results').innerText = data.with_results.toLocaleString();
+        animateCounter('stat-total', data.total);
+        animateCounter('stat-curp', data.with_curp);
+        animateCounter('stat-calc', data.curp_calculada || 0);
+        animateCounter('stat-no-curp', data.without_curp);
+        animateCounter('stat-results', data.with_results);
       } catch(e) { console.error(e); }
     }
 
@@ -2570,24 +2921,26 @@ HTML_CONTENT = """<!DOCTYPE html>
       const rawVal = cell.getAttribute('data-raw-val') || '';
 
       const coordBox = document.getElementById('cell-coord');
-      coordBox.innerText = `${col.letter}${activeRowIndex + 1} (${col.label})`;
+      if (coordBox) coordBox.innerText = `${col.letter}${activeRowIndex + 1} (${col.label})`;
 
       const formulaInput = document.getElementById('formula-input');
-      formulaInput.value = rawVal;
-
-      if (col.editable) {
-        formulaInput.readOnly = false;
-        formulaInput.classList.remove('readonly');
-        formulaInput.placeholder = "Editar CURP y presionar Enter...";
-      } else {
-        formulaInput.readOnly = true;
-        formulaInput.classList.add('readonly');
-        formulaInput.placeholder = "🔒 Campo de solo lectura";
+      if (formulaInput) {
+        formulaInput.value = rawVal;
+        if (col.editable) {
+          formulaInput.readOnly = false;
+          formulaInput.classList.remove('readonly');
+          formulaInput.placeholder = "Editar CURP y presionar Enter...";
+        } else {
+          formulaInput.readOnly = true;
+          formulaInput.classList.add('readonly');
+          formulaInput.placeholder = "🔒 Campo de solo lectura";
+        }
       }
     }
 
     function setupFormulaBarListener() {
       const formulaInput = document.getElementById('formula-input');
+      if (!formulaInput) return;
       formulaInput.addEventListener('keydown', (e) => {
         const col = COLUMNS[activeColIndex];
         if (!col.editable) return;
@@ -2697,7 +3050,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       cell.setAttribute('data-raw-val', newVal);
       cell.setAttribute('title', newVal);
       updateCellDisplay(cell, col.key, newVal);
-      document.getElementById('formula-input').value = newVal;
+      const fInput = document.getElementById('formula-input'); if (fInput) fInput.value = newVal;
 
       try {
         const res = await fetch(`${BASE_PATH}/api/record/${record.id}`, {
@@ -3103,11 +3456,40 @@ HTML_CONTENT = """<!DOCTYPE html>
       } catch(e) { console.error(e); }
     }
 
+    const PRESET_LABELS = {
+      'all': 'TODOS',
+      'no_curp': 'FALTA CURP',
+      'has_curp': 'CON CURP',
+      'calculada': 'CALCULADAS',
+      'no_calculable': 'NO CALCULABLES',
+      'has_results': 'CON RESULT'
+    };
+    const PRESET_KEYS = ['all', 'no_curp', 'has_curp', 'calculada', 'no_calculable', 'has_results'];
+
+    function syncMegaFilterBadge() {
+      const badgeText = document.getElementById('mega-filter-badge-text');
+      if (badgeText) {
+        badgeText.textContent = PRESET_LABELS[currentPresetFilter] || currentPresetFilter.toUpperCase();
+      }
+    }
+
+    function cyclePresetFilter() {
+      const idx = PRESET_KEYS.indexOf(currentPresetFilter);
+      const nextIdx = (idx + 1) % PRESET_KEYS.length;
+      setPresetFilter(PRESET_KEYS[nextIdx]);
+    }
+
     function setPresetFilter(f) {
       currentPresetFilter = f;
       currentPage = 1;
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      event.target.classList.add('active');
+      document.querySelectorAll('.tab-btn').forEach(b => {
+        if (b.getAttribute('onclick')?.includes(`'${f}'`)) {
+          b.classList.add('active');
+        } else {
+          b.classList.remove('active');
+        }
+      });
+      syncMegaFilterBadge();
       loadRecords();
     }
 
@@ -3128,7 +3510,8 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     window.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      const isInputActive = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
+      if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') || (e.key === '/' && !isInputActive)) {
         e.preventDefault();
         const searchInput = document.getElementById('global-search');
         if (searchInput) {
