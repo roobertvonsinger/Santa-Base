@@ -8,8 +8,9 @@
 
 ## 📌 Contexto Inmediato
 - El visor de 4.89M registros ya cuenta con orden jerárquico (`SELECTION` | `CURP` | `RFC` | `NOMBRE` | `ESTADO` | `CIUDAD` | `CP` | `DIRECCIÓN` | `LÍMITE` | `RESTO`), rescate y contraste de fecha de nacimiento dentro del RFC, multiselección con `Ctrl` / `Shift` / arrastre, tiradores de resize de columnas en Excel, y exportación TSV matricial.
+- **Design System de Tokens (Auditoría UI Resuelta)**: Tipografía escalada a 13px base / 12.5px mono, celdas de 36px con padding `6px 10px`, segmented control unificado para filtros predefinidos, toolbar en 4 clusters, micro-tarjetas KPI con jerarquía visual y sistema semántico de color de 3 niveles (desbloqueo/búsqueda en Primario `#0284c7`, peligro confinado a logout).
 - **Rendimiento SQLite**: Mapeo en RAM (`mmap_size = 2GB`), WAL activo e índice funcional `idx_santander_licrea_int` logrando ordenamiento numérico en **0.55 ms**.
-- **Pruebas Automatizadas**: Suite en verde (`pytest tests/test_api.py`) y prueba Chromium Playwright validada.
+- **Pruebas Automatizadas**: 6/6 tests en verde (`pytest tests/`) incluyendo validación unitaria de tokens y test visual interactivo en Chromium con Playwright.
 
 ---
 
