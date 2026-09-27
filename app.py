@@ -728,10 +728,35 @@ HTML_CONTENT = """<!DOCTYPE html>
       border-radius: var(--radius-sm);
     }
     .app-title {
+      display: flex;
+      align-items: baseline;
+      gap: 5px;
       font-size: 15px;
       font-weight: 700;
       color: #fff;
       letter-spacing: -0.3px;
+    }
+    .brand-santa {
+      font-size: 19px;
+      font-weight: 900;
+      color: var(--santander);
+      letter-spacing: -0.6px;
+      text-shadow: 0 0 14px rgba(236, 0, 0, 0.35);
+    }
+    .brand-pray {
+      font-size: 14px;
+      filter: drop-shadow(0 0 3px rgba(236, 0, 0, 0.4));
+      transform: translateY(-1px);
+    }
+    .brand-base {
+      font-size: 14px;
+      font-weight: 800;
+      font-style: italic;
+      letter-spacing: 1.8px;
+      background: linear-gradient(90deg, #ec0000 0%, #f59e0b 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
     }
     .stats-group {
       display: flex;
@@ -1644,7 +1669,7 @@ HTML_CONTENT = """<!DOCTYPE html>
   <div class="top-bar">
     <div class="brand-group">
       <span class="badge-santander">SANTANDER</span>
-      <h1 class="app-title">Bóveda Operativa</h1>
+      <h1 class="app-title"><span class="brand-santa">SANTA</span><span class="brand-pray">🙏🏻</span><span class="brand-base">BASE</span></h1>
       <span class="badge-excel">📊 EXCEL PRO GRID</span>
     </div>
     <div class="stats-group">
