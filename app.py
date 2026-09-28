@@ -11,6 +11,7 @@ Visor y Gestor Interactivo Excel-Pro para la Base de Datos Santander (4.9M regis
 - Puerto: 8055
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -18,6 +19,7 @@ import os
 import re
 import secrets
 import sqlite3
+import subprocess
 import time
 from typing import Any, Optional
 from fastapi import FastAPI, Query, HTTPException, Request, Response, Depends
@@ -491,6 +493,9 @@ def get_records(
         conn.close()
 
 @app.patch("/api/record/{record_id}")
+@app.put("/api/record/{record_id}")
+@app.patch("/api/records/{record_id}")
+@app.put("/api/records/{record_id}")
 def update_record(record_id: int, payload: UpdateRecordPayload, _: None = Depends(require_auth)):
     conn = get_db_connection()
     try:
@@ -661,13 +666,92 @@ from fastapi.responses import RedirectResponse
 class CheckCurpPayload(BaseModel):
     curp: str
 
-@app.post("/api/check_curp")
-async def check_curp_endpoint(payload: CheckCurpPayload, _: None = Depends(require_auth)):
+
+ACTIVE_CHECKS: dict[str, int] = {}
+USER_CHECK_HISTORY: dict[str, list[float]] = {}
+MAX_OPERATOR_CONCURRENT = 3
+MAX_OPERATOR_BURST_10S = 5
+
+def cleanup_orphan_chromium():
+    """Termina procesos huérfanos de Chromium/Chrome de root con más de 2 minutos de vida."""
+    if os.name != 'posix':
+        return
     try:
-        res = await check_single_curp(payload.curp)
+        cmd = ["ps", "-u", "root", "-o", "pid,etime,cmd"]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        for line in res.stdout.splitlines()[1:]:
+            parts = line.strip().split(None, 2)
+            if len(parts) >= 3:
+                pid_str, etime, cmdline = parts[0], parts[1], parts[2]
+                if ("chromium" in cmdline.lower() or "chrome" in cmdline.lower()) and pid_str.isdigit():
+                    is_old = False
+                    if "-" in etime or etime.count(":") >= 2:
+                        is_old = True
+                    elif etime.count(":") == 1:
+                        m, _ = etime.split(":")
+                        if m.isdigit() and int(m) >= 2:
+                            is_old = True
+                    if is_old:
+                        try:
+                            os.kill(int(pid_str), 9)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
+@app.on_event("startup")
+async def startup_watchdog():
+    async def watchdog_loop():
+        while True:
+            await asyncio.sleep(120)
+            try:
+                cleanup_orphan_chromium()
+            except Exception:
+                pass
+    asyncio.create_task(watchdog_loop())
+
+
+@app.post("/api/check_curp")
+async def check_curp_endpoint(payload: CheckCurpPayload, user: dict = Depends(require_auth)):
+    username = user.get("username", "unknown")
+    role = user.get("role", "operator")
+    is_superadmin = (role == "superadmin")
+    
+    curp = (payload.curp or "").strip().upper()
+    if not curp:
+        raise HTTPException(status_code=400, detail="El campo CURP no puede estar vacío.")
+
+    # 1. Control de concurrencia y anti-spam para operadores (Magdiel, Luisito)
+    if not is_superadmin:
+        active_now = ACTIVE_CHECKS.get(username, 0)
+        if active_now >= MAX_OPERATOR_CONCURRENT:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Límite alcanzado: Máximo {MAX_OPERATOR_CONCURRENT} verificaciones simultáneas permitidas para tu usuario ({username}). Espera a que termine una."
+            )
+            
+        now = time.time()
+        history = [t for t in USER_CHECK_HISTORY.get(username, []) if now - t < 10.0]
+        if len(history) >= MAX_OPERATOR_BURST_10S:
+            raise HTTPException(
+                status_code=429,
+                detail="Anti-Spam activado: Demasiadas solicitudes en pocos segundos. Por favor espera a que terminen tus comprobaciones."
+            )
+        history.append(now)
+        USER_CHECK_HISTORY[username] = history
+
+    # 2. Incremento de concurrencia activa
+    ACTIVE_CHECKS[username] = ACTIVE_CHECKS.get(username, 0) + 1
+    try:
+        res = await asyncio.wait_for(check_single_curp(curp), timeout=45.0)
         return res
+    except asyncio.TimeoutError:
+        return {"curp": curp, "status": "ERROR", "detail": "Timeout en Onboarding Santander (45s excedido)"}
     except Exception as e:
-        return {"status": "ERROR", "detail": str(e)}
+        return {"curp": curp, "status": "ERROR", "detail": f"Error: {str(e)[:80]}"}
+    finally:
+        ACTIVE_CHECKS[username] = max(0, ACTIVE_CHECKS.get(username, 1) - 1)
+        cleanup_orphan_chromium()
 
 @app.get("/", response_class=HTMLResponse)
 @app.get("/santabase", response_class=HTMLResponse)
@@ -3217,27 +3301,66 @@ function initApp() {
       } catch(e) {}
     }
 
+    const activeChecks = new Set();
+
     async function runCheck(e, rIdx, cIdx) {
       if (e) { e.stopPropagation(); e.preventDefault(); }
       const rec = currentRecords[rIdx];
       if (!rec) return;
-      const curp = rec.curp;
+
+      if (activeChecks.has(rec.id)) {
+        showToast("Esta fila ya se está verificando...", "info");
+        return;
+      }
+
+      // Límite en cliente: Máximo 3 checks simultáneos para operadores
+      const isSuperadmin = (currentUser && currentUser.role === 'superadmin');
+      if (!isSuperadmin && activeChecks.size >= 3) {
+        showToast("⚠️ Máximo 3 checks simultáneos permitidos. Espera a que termine uno.", "warning");
+        return;
+      }
+
+      const curp = (rec.curp || '').trim();
       const cell = document.getElementById(`cell-${rIdx}-${cIdx}`);
       if (!curp) {
         showToast("Se requiere CURP. Por favor ingresa el CURP para procesar.", "warning");
         if (cell) updateCellDisplay(cell, 'results', "SIN CURP");
         return;
       }
-      if (cell) cell.innerHTML = `<span style="color:#aaa;">Verificando...</span>`;
+
+      activeChecks.add(rec.id);
+      if (cell) {
+        cell.innerHTML = `<span style="display:inline-flex; align-items:center; gap:4px; color:#fbbf24; font-size:11px; font-weight:600;"><span class="spin">⏳</span> Verificando...</span>`;
+      }
+
       try {
         const res = await fetch(BASE_PATH + '/api/check_curp', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ curp: curp })
         });
-        if (res.status === 401) { showLockScreen(); return; }
+
+        if (res.status === 401) {
+          showLockScreen();
+          return;
+        }
+
+        if (res.status === 429) {
+          const errData = await res.json().catch(() => ({}));
+          const msg = errData.detail || "Límite de concurrencia (máx. 3 checks a la vez)";
+          showToast(`⚠️ ${msg}`, "warning");
+          if (cell) updateCellDisplay(cell, 'results', rec.results || "");
+          return;
+        }
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          showToast(`Error (${res.status}): ${errData.detail || 'Fallo en servidor'}`, "error");
+          if (cell) updateCellDisplay(cell, 'results', rec.results || "");
+          return;
+        }
+
         const data = await res.json();
-        
         let tag = '';
         if (data.status === 'ON') {
            tag = 'HIT';
@@ -3247,18 +3370,27 @@ function initApp() {
            tag = data.detail || 'ERROR';
         }
         
-        // Save to db
-        await fetch(BASE_PATH + '/api/records/' + rec.id, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ field: 'results', value: tag })
-        });
+        try {
+          await fetch(BASE_PATH + '/api/record/' + rec.id, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ field: 'results', value: tag })
+          });
+        } catch(saveErr) {
+          console.warn("Fallo persistiendo results:", saveErr);
+        }
+
         rec.results = tag;
         if (cell) updateCellDisplay(cell, 'results', tag);
         
+        if (tag === 'HIT') {
+          showToast(`¡HIT detectado para CURP ${curp}!`, "success");
+        }
       } catch (err) {
-        showToast("Error de conexion", "error");
+        showToast("Error de conexión al verificar CURP", "error");
         if (cell) updateCellDisplay(cell, 'results', rec.results || "");
+      } finally {
+        activeChecks.delete(rec.id);
       }
     }
 
