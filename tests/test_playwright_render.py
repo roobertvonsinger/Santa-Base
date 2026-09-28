@@ -98,6 +98,7 @@ async def test_ui():
         assert "rgb(236, 0, 0)" in btn_bg or "rgb(236,0,0)" in btn_bg.replace(" ", "")
 
         # Test login
+        await page.fill("#login-username", "Robertvs")
         await page.fill("#login-password", "Santabase")
         await page.click(".btn-login")
         await page.wait_for_timeout(1100)

@@ -40,6 +40,10 @@ def test_phase2_enhancements():
     assert '@media (max-width: 1280px)' in html
     assert '@media (max-width: 1050px)' in html
 
+    # 5. Lock screen: input de texto estricto sin menú desplegable select
+    assert '<input type="text" id="login-username"' in html
+    assert '<select id="login-username"' not in html
+
 def test_santabase_routing_and_redirects():
     # Canonical /santabase
     res = client.get("/santabase")
@@ -52,26 +56,31 @@ def test_santabase_routing_and_redirects():
     assert res_redir.headers["location"] == "/santabase"
 
 def test_rbac_botmex_multiuser_auth():
-    # 1. Superadmin (robertvs)
-    res = client.post("/api/auth/login", json={"username": "robertvs", "password": "Santabase"})
+    # 1. Superadmin (Robertvs)
+    res = client.post("/api/auth/login", json={"username": "Robertvs", "password": "Santabase"})
     assert res.status_code == 200
     data = res.json()
     assert data["ok"] is True
-    assert data["user"]["username"] == "robertvs"
+    assert data["user"]["username"] == "Robertvs"
     assert data["user"]["role"] == "superadmin"
 
-    # 2. Operador (magdiel)
-    res_mag = client.post("/api/auth/login", json={"username": "magdiel", "password": "Santabase"})
+    # 2. Operador (Magdiel)
+    res_mag = client.post("/api/auth/login", json={"username": "Magdiel", "password": "Santabase"})
     assert res_mag.status_code == 200
     assert res_mag.json()["user"]["role"] == "operator"
 
-    # 3. Operador (luisito)
-    res_lui = client.post("/api/auth/login", json={"username": "luisito", "password": "Santabase"})
+    # 3. Operador (Luisito)
+    res_lui = client.post("/api/auth/login", json={"username": "Luisito", "password": "Santabase"})
     assert res_lui.status_code == 200
     assert res_lui.json()["user"]["role"] == "operator"
 
-    # 4. Usuario desconocido rechazado
-    res_fake = client.post("/api/auth/login", json={"username": "hacker", "password": "any"})
+    # 4. Validación estricta: primer letra minúscula debe RECHAZARSE
+    res_lower = client.post("/api/auth/login", json={"username": "robertvs", "password": "Santabase"})
+    assert res_lower.status_code == 400
+    assert "primera letra" in res_lower.json()["detail"].lower()
+
+    # 5. Usuario desconocido rechazado
+    res_fake = client.post("/api/auth/login", json={"username": "Hacker", "password": "any"})
     assert res_fake.status_code == 401
 
 def test_security_directory_traversal_blocked():

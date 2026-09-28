@@ -58,17 +58,25 @@ async def security_and_routing_middleware(request: Request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     return response
 
+# ── Definición Canónica de Columnas de Base de Datos ─────────────────────
+DB_COLUMNS = [
+    "id", "u6rfc", "curp", "curp_status", "curp_falta", "dmname", "genero", "fecha_nacimiento",
+    "ciudad", "estado", "codigo_postal", "results", "u6acct", "u6cvereg", "u6numcto",
+    "dmssnum", "dmaddr1", "dmaddr2", "u6delomu", "u6estado", "dmcity", "dmzip",
+    "u6ladte1", "u6tel1", "u6ladte2", "u6tel2", "u6licrea"
+]
+
 # ── Multi-User RBAC & Authentication (Modelo Botmex Blindado) ──────────────
 DEFAULT_USERS: dict[str, dict] = {
-    "robertvs": {"display": "RobertVS", "telegram_id": 1341812706, "role": "superadmin"},
-    "magdiel":  {"display": "Magdiel",  "telegram_id": 1059367082, "role": "operator"},
-    "luisito":  {"display": "Luisito",  "telegram_id": 7847239854, "role": "operator"},
+    "Robertvs": {"display": "RobertVS", "telegram_id": 1341812706, "role": "superadmin"},
+    "Magdiel":  {"display": "Magdiel",  "telegram_id": 1059367082, "role": "operator"},
+    "Luisito":  {"display": "Luisito",  "telegram_id": 7847239854, "role": "operator"},
 }
 
 DEFAULT_PASSWORDS: dict[str, str] = {
-    "robertvs": "d677aa73ca12341112367842164dd250136718a8885b901edd2cfe8474c630eb",
-    "magdiel":  "4e93ba3f4dd91e3cfd4cbdeabf660839380442e9108da0efd010395e56a05a02",
-    "luisito":  "4e93ba3f4dd91e3cfd4cbdeabf660839380442e9108da0efd010395e56a05a02",
+    "Robertvs": "d677aa73ca12341112367842164dd250136718a8885b901edd2cfe8474c630eb",
+    "Magdiel":  "4e93ba3f4dd91e3cfd4cbdeabf660839380442e9108da0efd010395e56a05a02",
+    "Luisito":  "4e93ba3f4dd91e3cfd4cbdeabf660839380442e9108da0efd010395e56a05a02",
 }
 
 COOKIE_NAME = "santabase_session"
@@ -85,7 +93,7 @@ def sha256(plain: str) -> str:
     return hashlib.sha256(plain.encode('utf-8')).hexdigest()
 
 SESSION_TTL = 86_400  # 24h para operadores
-PERSISTENT_USERS = {"robertvs"}  # Sesión persistente para Superadmin
+PERSISTENT_USERS = {"Robertvs"}  # Sesión persistente para Superadmin
 PERSISTENT_TTL = 60 * 60 * 24 * 365 * 10  # 10 años
 
 def generate_session_token(username: str) -> str:
@@ -99,7 +107,7 @@ def verify_session_token(token: Optional[str]) -> Optional[dict]:
         return None
     try:
         username, timestamp_str, signature = token.split(":", 2)
-        username = username.strip().lower()
+        username = username.strip()
         if username not in DEFAULT_USERS:
             return None
         timestamp = int(timestamp_str)
@@ -143,7 +151,7 @@ def get_current_user(request: Request) -> Optional[dict]:
     if auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
         if token == AUTH_PASSWORD:
-            return {"username": "robertvs", **DEFAULT_USERS["robertvs"]}
+            return {"username": "Robertvs", **DEFAULT_USERS["Robertvs"]}
         user = verify_session_token(token)
         if user:
             return user
@@ -164,6 +172,9 @@ def require_superadmin(request: Request) -> dict:
 TOTAL_RECORDS_CACHE = None
 
 def get_db_connection():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL;")
@@ -171,6 +182,16 @@ def get_db_connection():
     conn.execute("PRAGMA mmap_size = 2147483648;")
     conn.execute("PRAGMA cache_size = -64000;")
     conn.execute("PRAGMA temp_store = MEMORY;")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS santander_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            u6rfc TEXT, curp TEXT, curp_status TEXT, curp_falta TEXT, dmname TEXT,
+            genero TEXT, fecha_nacimiento TEXT, ciudad TEXT, estado TEXT, codigo_postal TEXT,
+            results TEXT, u6acct TEXT, u6cvereg TEXT, u6numcto TEXT, dmssnum TEXT,
+            dmaddr1 TEXT, dmaddr2 TEXT, u6delomu TEXT, u6estado TEXT, dmcity TEXT,
+            dmzip TEXT, u6ladte1 TEXT, u6tel1 TEXT, u6ladte2 TEXT, u6tel2 TEXT, u6licrea TEXT
+        )
+    """)
     return conn
 
 def get_total_records_count(conn):
@@ -182,7 +203,7 @@ def get_total_records_count(conn):
     return TOTAL_RECORDS_CACHE
 
 class LoginPayload(BaseModel):
-    username: Optional[str] = "robertvs"
+    username: Optional[str] = None
     password: str
 
 class UpdateRecordPayload(BaseModel):
@@ -227,12 +248,27 @@ def login(payload: LoginPayload, request: Request, response: Response):
     client_ip = request.client.host if request.client else "unknown"
     check_rate_limit(client_ip)
 
-    raw_user = (payload.username or "robertvs").strip().lower()
+    raw_user = (payload.username or "").strip()
     password = payload.password.strip()
+
+    if not raw_user:
+        record_failed_attempt(client_ip)
+        raise HTTPException(status_code=400, detail="Debes escribir tu nombre de usuario")
+
+    # Validación estricta: primera letra obligatoriamente mayúscula y case-sensitive
+    if not raw_user[0].isupper():
+        record_failed_attempt(client_ip)
+        raise HTTPException(
+            status_code=400,
+            detail="La primera letra del usuario debe ser mayúscula obligatoriamente (ej. Robertvs, Magdiel, Luisito)"
+        )
 
     if raw_user not in DEFAULT_USERS:
         record_failed_attempt(client_ip)
-        raise HTTPException(status_code=401, detail="Usuario no autorizado")
+        raise HTTPException(
+            status_code=401,
+            detail="Usuario no autorizado o formato incorrecto (sensible a mayúsculas/minúsculas)"
+        )
 
     stored_hash = DEFAULT_PASSWORDS.get(raw_user)
     pwd_hash = sha256(password)
@@ -1145,7 +1181,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       color: #ff5555;
     }
 
-    /* Formulario Multi-Usuario en Lock Screen */
+    /* Formulario Multi-Usuario en Lock Screen (Input de Texto Estricto) */
     .login-field-group {
       text-align: left;
       margin-bottom: 14px;
@@ -1159,22 +1195,31 @@ HTML_CONTENT = """<!DOCTYPE html>
       text-transform: uppercase;
       letter-spacing: 0.05em;
     }
-    .login-select {
+    .login-input {
       width: 100%;
-      background: var(--bg-app);
+      background: #09090e;
       border: 1px solid var(--border-strong);
-      color: #fff;
-      padding: 10px 12px;
+      color: #ffffff;
+      padding: 10px 14px;
       border-radius: var(--radius-md);
-      font-size: 13px;
+      font-size: 13.5px;
       font-family: var(--font-sans);
+      font-weight: 500;
       outline: none;
-      cursor: pointer;
-      transition: var(--transition-fast);
+      transition: all 180ms ease;
+      box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4);
     }
-    .login-select:focus {
-      border-color: var(--border-focus);
-      box-shadow: 0 0 0 2px var(--color-primary-ring);
+    .login-input:focus {
+      border-color: var(--color-primary);
+      box-shadow: 0 0 0 2px var(--color-primary-ring), inset 0 2px 4px rgba(0, 0, 0, 0.4);
+    }
+    .login-hint {
+      display: block;
+      font-size: 10.5px;
+      color: var(--text-dim);
+      margin-top: 5px;
+      font-family: var(--font-mono);
+      letter-spacing: 0.02em;
     }
 
     /* Toolbar con 4 Clusters Visuales y Segmented Control */
@@ -2033,12 +2078,12 @@ HTML_CONTENT = """<!DOCTYPE html>
       <p class="lock-subtitle">Autenticación Segura Multi-Usuario — Bóveda Operativa (4.9M Registros)</p>
       
       <div class="login-field-group">
-        <label class="login-label">Usuario Autorizado</label>
-        <select id="login-username" class="login-select">
-          <option value="robertvs">👑 RobertVS (Superadmin)</option>
-          <option value="magdiel">👤 Magdiel (Operador)</option>
-          <option value="luisito">👤 Luisito (Operador)</option>
-        </select>
+        <label class="login-label">Usuario</label>
+        <input type="text" id="login-username" class="login-input" 
+               placeholder="Escribe tu usuario (ej. Robertvs)..." 
+               autocomplete="username" autocapitalize="words" spellcheck="false"
+               onkeydown="if(event.key==='Enter') document.getElementById('login-password')?.focus()">
+        <span class="login-hint">🔒 Sensible a mayúsculas. La 1ra letra debe ser Mayúscula.</span>
       </div>
 
       <div class="login-field-group">
@@ -2480,7 +2525,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     function showLockScreen() {
       document.getElementById('lock-screen').classList.remove('hidden');
-      setTimeout(() => document.getElementById('login-password')?.focus(), 100);
+      setTimeout(() => document.getElementById('login-username')?.focus(), 100);
     }
 
     function hideLockScreen() {
@@ -2493,14 +2538,30 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     async function submitLogin() {
-      const username = document.getElementById('login-username')?.value || 'robertvs';
+      const usernameInput = document.getElementById('login-username');
+      const username = usernameInput ? usernameInput.value.trim() : '';
       const pass = document.getElementById('login-password').value.trim();
       const errElem = document.getElementById('lock-error');
       errElem.classList.remove('show');
 
+      if (!username) {
+        errElem.innerText = 'Escribe tu usuario';
+        errElem.classList.add('show');
+        usernameInput?.focus();
+        return;
+      }
+
+      if (!/^[A-ZÁÉÍÓÚÑ]/.test(username)) {
+        errElem.innerText = 'La primera letra del usuario DEBE ser Mayúscula (ej. Robertvs)';
+        errElem.classList.add('show');
+        usernameInput?.focus();
+        return;
+      }
+
       if (!pass) {
         errElem.innerText = 'Ingresa la contraseña';
         errElem.classList.add('show');
+        document.getElementById('login-password')?.focus();
         return;
       }
 
@@ -2532,7 +2593,8 @@ HTML_CONTENT = """<!DOCTYPE html>
       await fetch(`${BASE_PATH}/api/auth/logout`, { method: 'POST' });
       currentUser = null;
       updateUserBadge(null);
-      document.getElementById('login-password').value = '';
+      if (document.getElementById('login-password')) document.getElementById('login-password').value = '';
+      if (document.getElementById('login-username')) document.getElementById('login-username').value = '';
       showLockScreen();
     }
 
