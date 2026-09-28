@@ -24,6 +24,8 @@ from fastapi import FastAPI, Query, HTTPException, Request, Response, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, Response as RawResponse
 from pydantic import BaseModel
 import uvicorn
+from santander_runner import check_single_curp
+
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "santander.db"))
 if not os.path.exists(DB_PATH):
@@ -372,6 +374,11 @@ def get_records(
         cur = conn.cursor()
         where_clauses = []
         params = []
+        
+        # Filter out records where birth year is before 1962.
+        # Year < 1962 means RFC YY (chars 5-6) is between '27' and '61'.
+        where_clauses.append("(SUBSTR(u6rfc, 5, 2) NOT BETWEEN '27' AND '61' OR LENGTH(u6rfc) < 6)")
+
 
         if filter == "no_curp":
             where_clauses.append("(curp IS NULL OR TRIM(curp) = '')")
@@ -649,6 +656,18 @@ def export_csv(
     )
 
 from fastapi.responses import RedirectResponse
+
+
+class CheckCurpPayload(BaseModel):
+    curp: str
+
+@app.post("/api/check_curp")
+async def check_curp_endpoint(payload: CheckCurpPayload, _: None = Depends(require_auth)):
+    try:
+        res = await check_single_curp(payload.curp)
+        return res
+    except Exception as e:
+        return {"status": "ERROR", "detail": str(e)}
 
 @app.get("/", response_class=HTMLResponse)
 @app.get("/santabase", response_class=HTMLResponse)
@@ -3140,6 +3159,51 @@ function initApp() {
         cell.setAttribute('data-raw-val', oldVal);
         cell.setAttribute('title', oldVal);
         updateCellDisplay(cell, col.key, oldVal);
+      }
+    }
+
+    async function runCheck(e, rIdx, cIdx) {
+      if (e) { e.stopPropagation(); e.preventDefault(); }
+      const rec = currentRecords[rIdx];
+      if (!rec) return;
+      const curp = rec.curp;
+      const cell = document.getElementById(cell-+rIdx+-+cIdx);
+      if (!curp) {
+        showToast("Se requiere CURP. Por favor ingresa el CURP para procesar.", "warning");
+        if (cell) updateCellDisplay(cell, 'results', "SIN CURP");
+        return;
+      }
+      if (cell) cell.innerHTML = <span style="color:#aaa;">Verificando...</span>;
+      try {
+        const res = await fetch(BASE_PATH + '/api/check_curp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ curp: curp })
+        });
+        if (res.status === 401) { showLockScreen(); return; }
+        const data = await res.json();
+        
+        let tag = '';
+        if (data.status === 'ON') {
+           tag = 'HIT';
+        } else if (data.status === 'OFF') {
+           tag = 'DEAD';
+        } else {
+           tag = data.detail || 'ERROR';
+        }
+        
+        // Save to db
+        await fetch(BASE_PATH + '/api/records/' + rec.id, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ field: 'results', value: tag })
+        });
+        rec.results = tag;
+        if (cell) updateCellDisplay(cell, 'results', tag);
+        
+      } catch (err) {
+        showToast("Error de conexion", "error");
+        if (cell) updateCellDisplay(cell, 'results', rec.results || "");
       }
     }
 
