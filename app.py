@@ -1711,7 +1711,24 @@ HTML_CONTENT = """<!DOCTYPE html>
       cursor: pointer;
       margin-left: 3px;
     }
-    .tag-btn.hit { border-color: #059669; color: #34d399; background: #064e3b; font-weight: 700; }
+    .tag-btn.hit, .tag-btn.live { 
+      border-color: #059669; 
+      color: #34d399; 
+      background: #064e3b; 
+      font-weight: 700; 
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      line-height: 1.2;
+      transition: all 0.15s ease;
+    }
+    .tag-btn.live:hover, .tag-btn.hit:hover {
+      background: #047857;
+      color: #ecfdf5;
+      box-shadow: 0 0 8px rgba(52, 211, 153, 0.4);
+      transform: translateY(-1px);
+    }
     .tag-btn.dead { border-color: #dc2626; color: #f87171; background: #450a0a; font-weight: 700; }
 
     /* Pagination Bar */
@@ -2795,10 +2812,21 @@ function initApp() {
               const gColor = rawVal === 'H' ? '#60a5fa' : '#f472b6';
               displayContent = `<span style="color:${gColor}; font-weight:700;">${rawVal}</span>`;
             } else if (col.key === 'results') {
-              let tagBadge = '';
-              if (rawVal === 'HIT') tagBadge = '<span class="tag-btn hit">HIT</span>';
-              else if (rawVal === 'DEAD') tagBadge = '<span class="tag-btn dead">DEAD</span>';
-              displayContent = `<span>${rawVal}</span> ${tagBadge}`;
+              let displayUI = '';
+              const isLive = (rawVal === 'HIT' || rawVal === 'LIVE' || rawVal === 'ON');
+              if (!rawVal) {
+                 displayUI = `<button class="btn check-btn" style="padding:4px 10px; border-radius:4px; font-weight:bold; background:#ec0000; color:white; border:none; cursor:pointer;" onclick="runCheck(event, ${rIdx}, ${cIdx})">Check</button>`;
+              } else if (isLive) {
+                const curpVal = escapeHtml(r.curp || '');
+                const tagBadge = `<a href="https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?utm_source=portal_publico&utm_medium=landing_page&utm_campaign=debito_likeu" target="_blank" rel="noopener noreferrer" class="tag-btn live" onclick="handleLiveLinkClick(event, '${curpVal}')" title="Abrir Onboarding LikeU en Santander (Copia CURP al portapapeles)">LIVE ↗</a>`;
+                displayUI = tagBadge;
+              } else if (rawVal === 'DEAD' || rawVal === 'OFF') {
+                displayUI = `<span class="tag-btn dead" style="width:100%;text-align:center;display:inline-block;padding:4px;background:rgba(255,255,255,0.1);color:#f87171;">DEAD</span>`;
+              } else {
+                 displayUI = `<span class="tag-btn error-lbl" style="flex:1; background:rgba(251,191,36,0.1); color:#fbbf24; border:1px solid #fbbf24; white-space: nowrap; overflow:hidden; text-overflow:ellipsis; padding:2px 6px; border-radius:4px; display:inline-block; font-size:10px;" title="${escapeHtml(rawVal)}">${escapeHtml(rawVal)}</span>`;
+                 displayUI += `<button class="btn check-btn" style="margin-left:5px; padding:2px 5px; cursor:pointer;" onclick="runCheck(event, ${rIdx}, ${cIdx})" title="Reintentar">↻</button>`;
+              }
+              displayContent = `<div style="display:flex; align-items:center; width:100%; justify-content:center;">${displayUI}</div>`;
             }
 
             const stickyStyle = col.sticky ? `position: sticky; left: ${col.stickyLeft}px; z-index: 10; background: #0e1627;` : '';
@@ -3160,6 +3188,31 @@ function initApp() {
         cell.setAttribute('title', oldVal);
         updateCellDisplay(cell, col.key, oldVal);
       }
+    function handleLiveLinkClick(e, curp) {
+      if (e) e.stopPropagation();
+      if (curp) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(curp).then(() => {
+            showToast(`CURP copiada: ${curp}`, 'success');
+          }).catch(() => {
+            fallbackCopy(curp);
+          });
+        } else {
+          fallbackCopy(curp);
+        }
+      }
+    }
+
+    function fallbackCopy(text) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showToast(`CURP copiada: ${text}`, 'success');
+      } catch(e) {}
     }
 
     async function runCheck(e, rIdx, cIdx) {
@@ -3167,13 +3220,13 @@ function initApp() {
       const rec = currentRecords[rIdx];
       if (!rec) return;
       const curp = rec.curp;
-      const cell = document.getElementById(cell-+rIdx+-+cIdx);
+      const cell = document.getElementById(`cell-${rIdx}-${cIdx}`);
       if (!curp) {
         showToast("Se requiere CURP. Por favor ingresa el CURP para procesar.", "warning");
         if (cell) updateCellDisplay(cell, 'results', "SIN CURP");
         return;
       }
-      if (cell) cell.innerHTML = <span style="color:#aaa;">Verificando...</span>;
+      if (cell) cell.innerHTML = `<span style="color:#aaa;">Verificando...</span>`;
       try {
         const res = await fetch(BASE_PATH + '/api/check_curp', {
           method: 'POST',
@@ -3216,10 +3269,21 @@ function initApp() {
           displayContent = `<span class="curp-empty">+ Ingresar CURP</span>`;
         }
       } else if (colKey === 'results') {
-        let tagBadge = '';
-        if (val === 'HIT') tagBadge = '<span class="tag-btn hit">HIT</span>';
-        else if (val === 'DEAD') tagBadge = '<span class="tag-btn dead">DEAD</span>';
-        displayContent = `<span>${escapeHtml(val)}</span> ${tagBadge}`;
+        let displayUI = '';
+        const isLive = (val === 'HIT' || val === 'LIVE' || val === 'ON');
+        if (!val) {
+           displayUI = `<button class="btn check-btn" style="padding:4px 10px; border-radius:4px; font-weight:bold; background:#ec0000; color:white; border:none; cursor:pointer;" onclick="runCheck(event, cell.dataset.rowIdx, cell.dataset.colIdx)">Check</button>`;
+        } else if (isLive) {
+           const rec = currentRecords[cell.dataset.rowIdx];
+           const curpVal = escapeHtml(rec ? rec.curp : '');
+           displayUI = `<a href="https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?utm_source=portal_publico&utm_medium=landing_page&utm_campaign=debito_likeu" target="_blank" rel="noopener noreferrer" class="tag-btn live" onclick="handleLiveLinkClick(event, '${curpVal}')" title="Abrir Onboarding LikeU en Santander (Copia CURP al portapapeles)">LIVE ↗</a>`;
+        } else if (val === 'DEAD' || val === 'OFF') {
+           displayUI = '<span class="tag-btn dead" style="width:100%;text-align:center;display:inline-block;padding:4px;background:rgba(255,255,255,0.1);color:#f87171;">DEAD</span>';
+        } else {
+           displayUI = `<span class="tag-btn error-lbl" style="flex:1; background:rgba(251,191,36,0.1); color:#fbbf24; border:1px solid #fbbf24; white-space: nowrap; overflow:hidden; text-overflow:ellipsis; padding:2px 6px; border-radius:4px; display:inline-block; font-size:10px;" title="${escapeHtml(val)}">${escapeHtml(val)}</span>`;
+           displayUI += `<button class="btn check-btn" style="margin-left:5px; padding:2px 5px; cursor:pointer;" onclick="runCheck(event, cell.dataset.rowIdx, cell.dataset.colIdx)" title="Reintentar">↻</button>`;
+        }
+        displayContent = `<div style="display:flex; align-items:center; width:100%; justify-content:center;">${displayUI}</div>`;
       }
       cell.innerHTML = displayContent;
     }
