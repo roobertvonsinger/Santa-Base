@@ -3188,6 +3188,8 @@ function initApp() {
         cell.setAttribute('title', oldVal);
         updateCellDisplay(cell, col.key, oldVal);
       }
+    }
+
     function handleLiveLinkClick(e, curp) {
       if (e) e.stopPropagation();
       if (curp) {
