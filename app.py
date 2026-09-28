@@ -2182,6 +2182,117 @@ HTML_CONTENT = """<!DOCTYPE html>
       80% { opacity: 1; transform: translateY(0); }
       100% { opacity: 0; transform: translateY(-6px); }
     }
+
+    /* ── Impeccable Design Pass: Check Button & Glimmer ── */
+    @keyframes checkGlimmerSweep {
+      0% { transform: translateX(-160%) skewX(-20deg); }
+      35%, 100% { transform: translateX(260%) skewX(-20deg); }
+    }
+    @keyframes spinLoader {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    .spin { display: inline-block; animation: spinLoader 1.4s linear infinite; }
+
+    .btn-check-curp {
+      position: relative;
+      overflow: hidden;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 3px 10px;
+      font-family: var(--font-sans);
+      font-size: 10.5px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #ffffff;
+      background: linear-gradient(135deg, rgba(236, 0, 0, 0.28) 0%, rgba(20, 10, 14, 0.95) 100%);
+      border: 1px solid rgba(236, 0, 0, 0.65);
+      border-radius: 5px;
+      cursor: pointer;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6), 0 0 8px rgba(236, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+      transition: all 180ms cubic-bezier(0.16, 1, 0.3, 1);
+      user-select: none;
+    }
+    .btn-check-curp::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 55%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.38), transparent);
+      transform: translateX(-160%) skewX(-20deg);
+      pointer-events: none;
+      animation: checkGlimmerSweep 3.6s infinite ease-in-out;
+    }
+    .btn-check-curp:hover {
+      background: linear-gradient(135deg, rgba(236, 0, 0, 0.45) 0%, rgba(38, 12, 18, 0.98) 100%);
+      border-color: #ff3333;
+      color: #ffffff;
+      transform: translateY(-1px);
+      box-shadow: 0 4px 14px rgba(236, 0, 0, 0.5), 0 0 16px rgba(236, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    }
+    .btn-check-curp:active {
+      transform: translateY(0.5px) scale(0.97);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.8), inset 0 1px 2px rgba(0, 0, 0, 0.5);
+    }
+    .btn-check-curp .check-icon {
+      font-size: 10px;
+      color: #ff4d4d;
+      filter: drop-shadow(0 0 4px rgba(236, 0, 0, 0.8));
+      transition: transform 180ms ease;
+    }
+    .btn-check-curp:hover .check-icon {
+      transform: scale(1.25);
+      color: #ff8080;
+    }
+
+    .btn-check-retry {
+      background: rgba(245, 158, 11, 0.18);
+      border: 1px solid rgba(245, 158, 11, 0.55);
+      color: #fbbf24;
+      border-radius: 4px;
+      padding: 2px 6px;
+      margin-left: 5px;
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 1;
+      transition: all 180ms ease;
+    }
+    .btn-check-retry:hover {
+      background: rgba(245, 158, 11, 0.35);
+      border-color: #f59e0b;
+      color: #fff;
+      transform: rotate(60deg);
+      box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
+    }
+
+    .checking-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: #fbbf24;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      background: rgba(245, 158, 11, 0.12);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      padding: 3px 8px;
+      border-radius: 4px;
+      user-select: none;
+    }
+
+    /* Polished Table Hover & Focus Accents */
+    tr[data-row-idx]:hover {
+      background-color: rgba(236, 0, 0, 0.06) !important;
+    }
+    tr[data-row-idx]:hover td.row-num-cell {
+      border-left: 3px solid #ec0000 !important;
+      color: #f3f4f6 !important;
+    }
   </style>
 </head>
 <body>
@@ -2899,16 +3010,16 @@ function initApp() {
               let displayUI = '';
               const isLive = (rawVal === 'HIT' || rawVal === 'LIVE' || rawVal === 'ON');
               if (!rawVal) {
-                 displayUI = `<button class="btn check-btn" style="padding:4px 10px; border-radius:4px; font-weight:bold; background:#ec0000; color:white; border:none; cursor:pointer;" onclick="runCheck(event, ${rIdx}, ${cIdx})">Check</button>`;
+                 displayUI = `<button class="btn-check-curp" onclick="runCheck(event, ${rIdx}, ${cIdx})" title="Verificar elegibilidad en Onboarding Santander"><span class="check-icon">⚡</span> CHECK</button>`;
               } else if (isLive) {
                 const curpVal = escapeHtml(r.curp || '');
                 const tagBadge = `<a href="https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?utm_source=portal_publico&utm_medium=landing_page&utm_campaign=debito_likeu" target="_blank" rel="noopener noreferrer" class="tag-btn live" onclick="handleLiveLinkClick(event, '${curpVal}')" title="Abrir Onboarding LikeU en Santander (Copia CURP al portapapeles)">LIVE ↗</a>`;
                 displayUI = tagBadge;
               } else if (rawVal === 'DEAD' || rawVal === 'OFF') {
-                displayUI = `<span class="tag-btn dead" style="width:100%;text-align:center;display:inline-block;padding:4px;background:rgba(255,255,255,0.1);color:#f87171;">DEAD</span>`;
+                displayUI = `<span class="tag-btn dead" style="width:100%;text-align:center;display:inline-block;padding:3px 6px;">DEAD</span>`;
               } else {
-                 displayUI = `<span class="tag-btn error-lbl" style="flex:1; background:rgba(251,191,36,0.1); color:#fbbf24; border:1px solid #fbbf24; white-space: nowrap; overflow:hidden; text-overflow:ellipsis; padding:2px 6px; border-radius:4px; display:inline-block; font-size:10px;" title="${escapeHtml(rawVal)}">${escapeHtml(rawVal)}</span>`;
-                 displayUI += `<button class="btn check-btn" style="margin-left:5px; padding:2px 5px; cursor:pointer;" onclick="runCheck(event, ${rIdx}, ${cIdx})" title="Reintentar">↻</button>`;
+                 displayUI = `<span class="tag-btn error-lbl" style="flex:1; background:rgba(251,191,36,0.12); color:#fbbf24; border:1px solid rgba(251,191,36,0.45); white-space: nowrap; overflow:hidden; text-overflow:ellipsis; padding:2px 6px; border-radius:4px; display:inline-block; font-size:10px;" title="${escapeHtml(rawVal)}">${escapeHtml(rawVal)}</span>`;
+                 displayUI += `<button class="btn-check-retry" onclick="runCheck(event, ${rIdx}, ${cIdx})" title="Reintentar verificación">↻</button>`;
               }
               displayContent = `<div style="display:flex; align-items:center; width:100%; justify-content:center;">${displayUI}</div>`;
             }
@@ -3330,7 +3441,7 @@ function initApp() {
 
       activeChecks.add(rec.id);
       if (cell) {
-        cell.innerHTML = `<span style="display:inline-flex; align-items:center; gap:4px; color:#fbbf24; font-size:11px; font-weight:600;"><span class="spin">⏳</span> Verificando...</span>`;
+        cell.innerHTML = `<span class="checking-pill"><span class="spin">⏳</span> VERIFICANDO...</span>`;
       }
 
       try {
@@ -3406,16 +3517,16 @@ function initApp() {
         let displayUI = '';
         const isLive = (val === 'HIT' || val === 'LIVE' || val === 'ON');
         if (!val) {
-           displayUI = `<button class="btn check-btn" style="padding:4px 10px; border-radius:4px; font-weight:bold; background:#ec0000; color:white; border:none; cursor:pointer;" onclick="runCheck(event, cell.dataset.rowIdx, cell.dataset.colIdx)">Check</button>`;
+           displayUI = `<button class="btn-check-curp" onclick="runCheck(event, cell.dataset.rowIdx, cell.dataset.colIdx)" title="Verificar elegibilidad en Onboarding Santander"><span class="check-icon">⚡</span> CHECK</button>`;
         } else if (isLive) {
            const rec = currentRecords[cell.dataset.rowIdx];
            const curpVal = escapeHtml(rec ? rec.curp : '');
            displayUI = `<a href="https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?utm_source=portal_publico&utm_medium=landing_page&utm_campaign=debito_likeu" target="_blank" rel="noopener noreferrer" class="tag-btn live" onclick="handleLiveLinkClick(event, '${curpVal}')" title="Abrir Onboarding LikeU en Santander (Copia CURP al portapapeles)">LIVE ↗</a>`;
         } else if (val === 'DEAD' || val === 'OFF') {
-           displayUI = '<span class="tag-btn dead" style="width:100%;text-align:center;display:inline-block;padding:4px;background:rgba(255,255,255,0.1);color:#f87171;">DEAD</span>';
+           displayUI = '<span class="tag-btn dead" style="width:100%;text-align:center;display:inline-block;padding:3px 6px;">DEAD</span>';
         } else {
-           displayUI = `<span class="tag-btn error-lbl" style="flex:1; background:rgba(251,191,36,0.1); color:#fbbf24; border:1px solid #fbbf24; white-space: nowrap; overflow:hidden; text-overflow:ellipsis; padding:2px 6px; border-radius:4px; display:inline-block; font-size:10px;" title="${escapeHtml(val)}">${escapeHtml(val)}</span>`;
-           displayUI += `<button class="btn check-btn" style="margin-left:5px; padding:2px 5px; cursor:pointer;" onclick="runCheck(event, cell.dataset.rowIdx, cell.dataset.colIdx)" title="Reintentar">↻</button>`;
+           displayUI = `<span class="tag-btn error-lbl" style="flex:1; background:rgba(251,191,36,0.12); color:#fbbf24; border:1px solid rgba(251,191,36,0.45); white-space: nowrap; overflow:hidden; text-overflow:ellipsis; padding:2px 6px; border-radius:4px; display:inline-block; font-size:10px;" title="${escapeHtml(val)}">${escapeHtml(val)}</span>`;
+           displayUI += `<button class="btn-check-retry" onclick="runCheck(event, cell.dataset.rowIdx, cell.dataset.colIdx)" title="Reintentar verificación">↻</button>`;
         }
         displayContent = `<div style="display:flex; align-items:center; width:100%; justify-content:center;">${displayUI}</div>`;
       }
