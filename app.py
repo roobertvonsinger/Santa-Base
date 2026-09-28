@@ -26,7 +26,7 @@ from fastapi import FastAPI, Query, HTTPException, Request, Response, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, Response as RawResponse
 from pydantic import BaseModel
 import uvicorn
-from santander_runner import check_single_curp
+from santander_runner import check_single_curp, format_short_reason
 
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "santander.db"))
@@ -744,6 +744,8 @@ async def check_curp_endpoint(payload: CheckCurpPayload, user: dict = Depends(re
     ACTIVE_CHECKS[username] = ACTIVE_CHECKS.get(username, 0) + 1
     try:
         res = await asyncio.wait_for(check_single_curp(curp), timeout=45.0)
+        if res.get("status") == "OFF":
+            res["short_reason"] = format_short_reason(res.get("detail", ""))
         return res
     except asyncio.TimeoutError:
         return {"curp": curp, "status": "ERROR", "detail": "Timeout en Onboarding Santander (45s excedido)"}
@@ -2558,7 +2560,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       { key: "codigo_postal", label: "C.P.", letter: "F", width: "65px", mono: true, editable: false },
       { key: "direccion", label: "DIRECCIÓN COMPLETA", letter: "G", width: "320px", mono: false, editable: false },
       { key: "u6licrea", label: "LÍMITE CRÉDITO", letter: "H", width: "115px", mono: true, editable: false },
-      { key: "results", label: "RESULTS", letter: "I", width: "95px", mono: false, editable: false },
+      { key: "results", label: "RESULTS", letter: "I", width: "125px", mono: false, editable: false },
       { key: "u6acct", label: "TARJETA (16D)", letter: "J", width: "155px", mono: true, editable: false },
       { key: "genero", label: "GÉNERO", letter: "K", width: "65px", mono: true, editable: false },
       { key: "curp_status", label: "ESTADO CURP", letter: "L", width: "105px", mono: true, editable: false },
@@ -3009,19 +3011,22 @@ function initApp() {
             } else if (col.key === 'results') {
               let displayUI = '';
               const isLive = (rawVal === 'HIT' || rawVal === 'LIVE' || rawVal === 'ON');
+              const isNeg = isNegativeResult(rawVal);
               if (!rawVal) {
                  displayUI = `<button class="btn-check-curp" onclick="runCheck(event, ${rIdx}, ${cIdx})" title="Verificar elegibilidad en Onboarding Santander"><span class="check-icon">⚡</span> CHECK</button>`;
               } else if (isLive) {
                 const curpVal = escapeHtml(r.curp || '');
-                const tagBadge = `<a href="https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?utm_source=portal_publico&utm_medium=landing_page&utm_campaign=debito_likeu" target="_blank" rel="noopener noreferrer" class="tag-btn live" onclick="handleLiveLinkClick(event, '${curpVal}')" title="Abrir Onboarding LikeU en Santander (Copia CURP al portapapeles)">LIVE ↗</a>`;
-                displayUI = tagBadge;
-              } else if (rawVal === 'DEAD' || rawVal === 'OFF') {
-                displayUI = `<span class="tag-btn dead" style="width:100%;text-align:center;display:inline-block;padding:3px 6px;">DEAD</span>`;
+                displayUI = `<span class="tag-btn hit" onclick="copyInlineText(event, '${curpVal}', 'CURP')" title="Elegible Santander (Clic para copiar CURP)"><span style="margin-right:3px;">✅</span>HIT</span>`;
+                displayUI += `<button class="btn-check-retry" onclick="runCheck(event, ${rIdx}, ${cIdx})" title="Re-verificar contra Onboarding">↻</button>`;
+              } else if (isNeg) {
+                const shortText = formatShortReason(rawVal);
+                displayUI = `<span class="tag-btn dead" style="padding:3px 7px;" title="Rechazo Santander: ${escapeHtml(rawVal)}"><span style="opacity:0.75; font-size:9px; margin-right:3px;">✕</span>${escapeHtml(shortText)}</span>`;
+                displayUI += `<button class="btn-check-retry" onclick="runCheck(event, ${rIdx}, ${cIdx})" title="Re-verificar contra Onboarding">↻</button>`;
               } else {
                  displayUI = `<span class="tag-btn error-lbl" style="flex:1; background:rgba(251,191,36,0.12); color:#fbbf24; border:1px solid rgba(251,191,36,0.45); white-space: nowrap; overflow:hidden; text-overflow:ellipsis; padding:2px 6px; border-radius:4px; display:inline-block; font-size:10px;" title="${escapeHtml(rawVal)}">${escapeHtml(rawVal)}</span>`;
                  displayUI += `<button class="btn-check-retry" onclick="runCheck(event, ${rIdx}, ${cIdx})" title="Reintentar verificación">↻</button>`;
               }
-              displayContent = `<div style="display:flex; align-items:center; width:100%; justify-content:center;">${displayUI}</div>`;
+              displayContent = `<div style="display:flex; align-items:center; width:100%; justify-content:center; gap:3px;">${displayUI}</div>`;
             }
 
             const stickyStyle = col.sticky ? `position: sticky; left: ${col.stickyLeft}px; z-index: 10; background: #0e1627;` : '';
@@ -3412,6 +3417,32 @@ function initApp() {
       } catch(e) {}
     }
 
+    
+    function formatShortReason(detail) {
+      if (!detail) return "Rechazo";
+      const s = String(detail).trim();
+      if (s.includes("PE1002")) return "PE1002";
+      if (s.toLowerCase().includes("timeout")) return "Timeout";
+      if (s.includes("confirm-contact") || s.toLowerCase().includes("contacto") || s.toLowerCase().includes("preexistente")) return "Reg. previo";
+      if (s.toLowerCase().includes("derivation") || s.toLowerCase().includes("likeu")) return "LikeU Pro";
+      if (s.toLowerCase().includes("sucursal") || s.toLowerCase().includes("rechazo")) return "Sucursal";
+      if (s === "OFF" || s === "DEAD") return "Rechazo";
+      return s.length > 15 ? s.slice(0, 14) + "…" : s;
+    }
+
+    function isNegativeResult(val) {
+      if (!val) return false;
+      const s = String(val).toUpperCase();
+      if (s === 'HIT' || s === 'LIVE' || s === 'ON') return false;
+      if (s === 'DEAD' || s === 'OFF' || s === 'RECHAZO' || s === 'NO CUMPLE' ||
+          s.includes('PE1002') || s.includes('PREVIO') || s.includes('CONTACTO') ||
+          s.includes('LIKEU') || s.includes('SUCURSAL') || s.includes('TIMEOUT') ||
+          s.includes('CONFIRM-DATA')) {
+        return true;
+      }
+      return false;
+    }
+
     const activeChecks = new Set();
 
     async function runCheck(e, rIdx, cIdx) {
@@ -3476,7 +3507,7 @@ function initApp() {
         if (data.status === 'ON') {
            tag = 'HIT';
         } else if (data.status === 'OFF') {
-           tag = 'DEAD';
+           tag = data.short_reason || formatShortReason(data.detail);
         } else {
            tag = data.detail || 'ERROR';
         }
@@ -3516,19 +3547,23 @@ function initApp() {
       } else if (colKey === 'results') {
         let displayUI = '';
         const isLive = (val === 'HIT' || val === 'LIVE' || val === 'ON');
+        const isNeg = isNegativeResult(val);
         if (!val) {
            displayUI = `<button class="btn-check-curp" onclick="runCheck(event, cell.dataset.rowIdx, cell.dataset.colIdx)" title="Verificar elegibilidad en Onboarding Santander"><span class="check-icon">⚡</span> CHECK</button>`;
         } else if (isLive) {
            const rec = currentRecords[cell.dataset.rowIdx];
            const curpVal = escapeHtml(rec ? rec.curp : '');
-           displayUI = `<a href="https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?utm_source=portal_publico&utm_medium=landing_page&utm_campaign=debito_likeu" target="_blank" rel="noopener noreferrer" class="tag-btn live" onclick="handleLiveLinkClick(event, '${curpVal}')" title="Abrir Onboarding LikeU en Santander (Copia CURP al portapapeles)">LIVE ↗</a>`;
-        } else if (val === 'DEAD' || val === 'OFF') {
-           displayUI = '<span class="tag-btn dead" style="width:100%;text-align:center;display:inline-block;padding:3px 6px;">DEAD</span>';
+           displayUI = `<span class="tag-btn hit" onclick="copyInlineText(event, '${curpVal}', 'CURP')" title="Elegible Santander (Clic para copiar CURP)"><span style="margin-right:3px;">✅</span>HIT</span>`;
+           displayUI += `<button class="btn-check-retry" onclick="runCheck(event, cell.dataset.rowIdx, cell.dataset.colIdx)" title="Re-verificar contra Onboarding">↻</button>`;
+        } else if (isNeg) {
+           const shortText = formatShortReason(val);
+           displayUI = `<span class="tag-btn dead" style="padding:3px 7px;" title="Rechazo Santander: ${escapeHtml(val)}"><span style="opacity:0.75; font-size:9px; margin-right:3px;">✕</span>${escapeHtml(shortText)}</span>`;
+           displayUI += `<button class="btn-check-retry" onclick="runCheck(event, cell.dataset.rowIdx, cell.dataset.colIdx)" title="Re-verificar contra Onboarding">↻</button>`;
         } else {
            displayUI = `<span class="tag-btn error-lbl" style="flex:1; background:rgba(251,191,36,0.12); color:#fbbf24; border:1px solid rgba(251,191,36,0.45); white-space: nowrap; overflow:hidden; text-overflow:ellipsis; padding:2px 6px; border-radius:4px; display:inline-block; font-size:10px;" title="${escapeHtml(val)}">${escapeHtml(val)}</span>`;
            displayUI += `<button class="btn-check-retry" onclick="runCheck(event, cell.dataset.rowIdx, cell.dataset.colIdx)" title="Reintentar verificación">↻</button>`;
         }
-        displayContent = `<div style="display:flex; align-items:center; width:100%; justify-content:center;">${displayUI}</div>`;
+        displayContent = `<div style="display:flex; align-items:center; width:100%; justify-content:center; gap:3px;">${displayUI}</div>`;
       }
       cell.innerHTML = displayContent;
     }

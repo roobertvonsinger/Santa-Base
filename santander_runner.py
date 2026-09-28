@@ -5,6 +5,23 @@ import json
 import re
 from playwright.async_api import async_playwright
 
+
+def format_short_reason(detail: str) -> str:
+    if not detail:
+        return "Rechazo"
+    short = detail.strip()
+    if "PE1002" in short:
+        return "PE1002"
+    elif "timeout" in short.lower():
+        return "Timeout"
+    elif "confirm-contact" in short or "contacto" in short.lower():
+        return "Reg. previo"
+    elif "derivation" in short.lower() or "likeu" in short.lower():
+        return "LikeU Pro"
+    elif "sucursal" in short.lower() or "rechazo" in short.lower():
+        return "Sucursal"
+    return short[:15].strip()
+
 START_URL = "https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?utm_source=google-pmax&utm_medium=multi-channel&utm_campaign=MX_RCB_ACC_DEB_NA_AO_N2-PMAX_CVN_CVN_MLT_GAD_PMX_PMAX_NA_CPA&utm_content=multiple_bonif200"
 
 async def check_single_curp(curp: str) -> dict:
@@ -17,6 +34,9 @@ async def check_single_curp(curp: str) -> dict:
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
+                    "--disable-site-isolation-trials",
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
@@ -24,18 +44,54 @@ async def check_single_curp(curp: str) -> dict:
                     "--no-zygote",
                     "--disable-extensions",
                     "--disable-background-networking",
-                    "--window-size=430,900"
+                    "--window-size=430,932"
                 ]
             )
             try:
                 ctx = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
-                    viewport={"width": 430, "height": 900},
-                    geolocation={"latitude": 20.6639, "longitude": -103.359},
+                    user_agent="Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+                    viewport={"width": 430, "height": 932},
+                    device_scale_factor=2.5,
+                    is_mobile=True,
+                    has_touch=True,
+                    locale="es-MX",
+                    timezone_id="America/Mexico_City",
+                    geolocation={"latitude": 19.4326, "longitude": -99.1332},
                     permissions=["geolocation"]
                 )
+                
+                # Cloak webdriver & emulate real mobile Chrome environment
+                await ctx.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                    window.chrome = { runtime: {} };
+                    Object.defineProperty(navigator, 'languages', { get: () => ['es-MX', 'es', 'en'] });
+                    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+                """)
+
                 try:
                     pg = await ctx.new_page()
+                    
+                    # CSP Bypass for Santander FAD
+                    async def handle_route(route):
+                        try:
+                            response = await route.fetch()
+                            headers = dict(response.headers)
+                            headers.pop("content-security-policy", None)
+                            headers.pop("content-security-policy-report-only", None)
+                            headers["access-control-allow-origin"] = "*"
+                            await route.fulfill(response=response, headers=headers)
+                        except Exception:
+                            try:
+                                await route.continue_()
+                            except Exception:
+                                pass
+
+                    try:
+                        await pg.route("**/santander_fad/**", handle_route)
+                        await pg.route("**/cuenta-digital-lite/**", handle_route)
+                    except Exception:
+                        pass
+
                     await pg.goto(START_URL, wait_until="domcontentloaded", timeout=20000)
                     
                     # Click initial 'aquí' / esperar campo
