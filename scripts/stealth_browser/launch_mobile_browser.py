@@ -48,6 +48,18 @@ os.makedirs(USER_DATA_BASE, exist_ok=True)
 SESSION_META_FILE = os.path.join(USER_DATA_BASE, "last_session.json")
 SESSION_STORAGE_STATE = os.path.join(USER_DATA_BASE, "storage_state.json")
 OPERATOR_CONFIG_FILE = os.path.join(USER_DATA_BASE, "operator_config.json")
+NETWORK_LOG_FILE = os.path.join(USER_DATA_BASE, "network_debug.log")
+
+
+def _log_network_event(line: str):
+    """Evidencia cruda de requests/responses contra Santander durante la sesión — para
+    confirmar con datos (no suposición) si el backend valida geolocation reportada por el
+    cliente, IP de origen, o ambos. Ver network_debug.log junto a storage_state.json."""
+    try:
+        with open(NETWORK_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().strftime('%H:%M:%S')} {line}\n")
+    except Exception:
+        pass
 
 # Coordenadas estáticas para evitar consumo de MB en NodeMaven / detectar region por texto del
 # username del proxy o por el --estado= pasado desde la boveda.
@@ -212,6 +224,25 @@ def get_proxy_location(proxy_dict: dict, region_hint: str | None = None) -> dict
         "region": "Oaxaca",
         "lat": round(17.0608 + random.uniform(-0.001, 0.001), 5),
         "lon": round(-96.7253 + random.uniform(-0.001, 0.001), 5),
+        "timezone": "America/Mexico_City",
+        "matched_hint": False,
+    }
+
+
+def resolve_direct_mode_location(region_hint: str | None) -> dict:
+    """Ubicación a reportar vía geolocation cuando el operador usa su IP local (Directo).
+    El supuesto de 'Directo' es que el operador YA está físicamente en el estado del hit, así
+    que el GPS reportado debe coincidir con el estado del hit (region_hint), nunca quedarse en
+    un default fijo (antes: CDMX hardcodeado en el arranque, o (0,0) en el switch en caliente —
+    ambos mandaban una ubicación que no correspondía al hit real)."""
+    loc = lookup_region_coords(region_hint) if region_hint else None
+    if loc:
+        return {**loc, "matched_hint": True}
+    return {
+        "city": "Ciudad de México",
+        "region": "CDMX",
+        "lat": 19.4326,
+        "lon": -99.1332,
         "timezone": "America/Mexico_City",
         "matched_hint": False,
     }
@@ -535,7 +566,7 @@ class ProxySwitcherWidget:
         cur = self.proxy_mgr.get_current()
         idx = self.proxy_mgr.current_idx + 1
         total = max(1, len(self.proxy_mgr.proxies))
-        loc = get_proxy_location(cur, self.region_hint) if cur else {"city": "Directo (tu IP)", "region": "Local", "lat": 0, "lon": 0, "matched_hint": True}
+        loc = get_proxy_location(cur, self.region_hint) if cur else resolve_direct_mode_location(self.region_hint)
 
         if cur:
             self.lbl_active.config(text=f"Proxy [{idx}/{total}]: {cur.get('host')}:{cur.get('port')}")
@@ -577,7 +608,7 @@ class ProxySwitcherWidget:
 
     def apply_switch(self):
         cur = self.proxy_mgr.get_current()
-        loc = get_proxy_location(cur, self.region_hint) if cur else {"city": "Directo", "region": "Local", "lat": 0, "lon": 0}
+        loc = get_proxy_location(cur, self.region_hint) if cur else resolve_direct_mode_location(self.region_hint)
         self.update_display()
         self.lbl_status.config(text=f"Cambiando a {loc.get('city')}... (tu sesión/cookies se conservan)", foreground="#0055aa")
         self.cmd_queue.put(("switch_proxy", (cur, loc)))
@@ -592,7 +623,7 @@ def browser_worker(proxy_mgr: ProxyManager, cmd_queue: queue.Queue, stop_event: 
                     region_hint: str | None = None, initial_curp: str | None = None):
     browser_bin, browser_name = find_browser_executable()
     cur = proxy_mgr.get_current()
-    loc = get_proxy_location(cur, region_hint) if cur else {"city": "Directo", "region": "Local", "lat": 19.4326, "lon": -99.1332, "timezone": "America/Mexico_City"}
+    loc = get_proxy_location(cur, region_hint) if cur else resolve_direct_mode_location(region_hint)
 
     MOBILE_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
 
@@ -658,6 +689,62 @@ def browser_worker(proxy_mgr: ProxyManager, cmd_queue: queue.Queue, stop_event: 
 
                 ctx = b.new_context(**ctx_kwargs)
 
+                # Bloqueo de ad-tech de 3ros (Google Ads/remarketing, Facebook Pixel, Bing Ads,
+                # Adobe Target) — verificado 2026-09-30 vía network_debug.log: 613 de 1076
+                # requests en una sola sesión eran esto, CERO funcionales para el flujo de
+                # onboarding (sin reCAPTCHA de por medio). Cada uno pasa por el mismo proxy que
+                # el tráfico real, así que esto es lo que drena cuota y ralentiza la carga.
+                # maps.googleapis.com y dynatrace (1st-party de Santander) NO se tocan: el primero
+                # es el que resuelve la geolocation que mandamos, es funcional.
+                AD_TECH_BLOCKLIST = (
+                    "doubleclick.net",
+                    "googleadservices.com",
+                    "googlesyndication.com",
+                    "www.facebook.com",
+                    "connect.facebook.net",
+                    "bat.bing.com",
+                    "tt.omtrdc.net",
+                    "analytics.google.com",
+                    "adservice.google.com",
+                )
+
+                def _handle_ad_block(route):
+                    url = route.request.url
+                    if any(dom in url for dom in AD_TECH_BLOCKLIST):
+                        route.abort()
+                        return
+                    if "www.google.com/pagead/" in url or "www.google.com/rmkt/" in url:
+                        route.abort()
+                        return
+                    route.continue_()
+
+                try:
+                    ctx.route("**/*", _handle_ad_block)
+                except Exception:
+                    pass
+
+                def _on_request(req):
+                    if "santander" not in req.url:
+                        return
+                    try:
+                        post = req.post_data
+                        if post and len(post) > 600:
+                            post = post[:600] + "...(truncado)"
+                        _log_network_event(f"[REQ] {req.method} {req.url} | body={post}")
+                    except Exception:
+                        pass
+
+                def _on_response(res):
+                    if "santander" not in res.url:
+                        return
+                    try:
+                        _log_network_event(f"[RES] {res.status} {res.url}")
+                    except Exception:
+                        pass
+
+                ctx.on("request", _on_request)
+                ctx.on("response", _on_response)
+
                 target_origins = [
                     "https://santander.com.mx",
                     "https://www.santander.com.mx",
@@ -675,6 +762,17 @@ def browser_worker(proxy_mgr: ProxyManager, cmd_queue: queue.Queue, stop_event: 
                 # Neutralizador de bugs Santander FAD (CSP Bypass) — verificado 2026-09-30: SIN esto,
                 # Chromium tira net::ERR_RESPONSE_HEADERS_TRUNCATED contra este dominio.
                 def handle_route(route):
+                    # El CSP-bypass (fetch manual + fulfill) solo hace falta para el documento
+                    # principal y llamadas XHR/fetch — ahí es donde Santander manda el header CSP
+                    # que truena Chromium (net::ERR_RESPONSE_HEADERS_TRUNCATED, verificado
+                    # 2026-09-30). Para assets estáticos (JS/CSS/fuentes/imágenes) el roundtrip
+                    # manual solo agrega latencia sin necesidad — se dejan pasar directo.
+                    if route.request.resource_type not in ("document", "xhr", "fetch"):
+                        try:
+                            route.continue_()
+                        except Exception:
+                            pass
+                        return
                     try:
                         response = route.fetch()
                         headers = dict(response.headers)
