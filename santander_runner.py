@@ -36,16 +36,60 @@ def get_default_residential_proxy() -> Dict[str, str]:
     }
 
 
+STATE_COORDS = {
+    "nuevo leon": ("25.6866", "-100.3161"),
+    "jalisco": ("20.6597", "-103.3496"),
+    "ciudad de mexico": ("19.4326", "-99.1332"),
+    "cdmx": ("19.4326", "-99.1332"),
+    "distrito federal": ("19.4326", "-99.1332"),
+    "durango": ("24.0277", "-104.6532"),
+    "puebla": ("19.0414", "-98.2063"),
+    "queretaro": ("20.5888", "-100.3899"),
+    "baja california": ("32.5149", "-117.0382"),
+    "quintana roo": ("21.1619", "-86.8515"),
+    "yucatan": ("20.9674", "-89.5926"),
+    "veracruz": ("19.1738", "-96.1342"),
+    "chiapas": ("16.7569", "-93.1292"),
+    "guanajuato": ("21.1221", "-101.6826"),
+    "sinaloa": ("24.8091", "-107.3940"),
+    "sonora": ("29.0729", "-110.9559"),
+    "chihuahua": ("28.6353", "-106.0889"),
+    "coahuila": ("25.4260", "-101.0053"),
+    "san luis potosi": ("22.1565", "-100.9855"),
+    "aguascalientes": ("21.8853", "-102.2916"),
+    "morelos": ("18.9242", "-99.2216"),
+    "estado de mexico": ("19.2826", "-99.6557"),
+    "mexico": ("19.2826", "-99.6557"),
+    "hidalgo": ("20.1011", "-98.7591"),
+    "oaxaca": ("17.0608", "-96.7253"),
+}
+
+
+def get_coords_for_state(state_name: str) -> tuple[str, str]:
+    if not state_name:
+        return ("19.4326", "-99.1332")
+    s = state_name.strip().lower()
+    for a, b in [("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ñ", "n")]:
+        s = s.replace(a, b)
+    for k, v in STATE_COORDS.items():
+        if k in s or s in k:
+            return v
+    return ("19.4326", "-99.1332")
+
+
 def _execute_attempt(
     curp: str,
     proxy: Optional[Dict[str, str]] = None,
     state: str = "NUEVO LEON",
-    lat: str = "25.748",
-    lon: str = "-100.285"
+    lat: Optional[str] = None,
+    lon: Optional[str] = None
 ) -> Dict[str, Any]:
     t0 = time.time()
     if proxy is None:
         proxy = get_default_residential_proxy()
+
+    if not lat or not lon:
+        lat, lon = get_coords_for_state(state)
 
     srv = proxy.get("server", "").replace("http://", "").replace("https://", "")
     usr = proxy.get("username", "")
@@ -72,7 +116,7 @@ def _execute_attempt(
         r1 = session.get(
             "https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/session/init",
             headers=headers,
-            timeout=12
+            timeout=8
         )
         if r1.status_code != 200:
             return {
@@ -93,8 +137,9 @@ def _execute_attempt(
                     "originFlow": "/cuenta-digital-lite/personal-data"
                 }
             },
-            timeout=12
+            timeout=8
         )
+
         if r2.status_code != 200:
             return {
                 "curp": curp,
@@ -108,7 +153,7 @@ def _execute_attempt(
             "https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/curp/consulta",
             headers=headers,
             json={"data": {"birthCountry": "052", "mainPersonalIdentifier": curp}},
-            timeout=15
+            timeout=10
         )
         if r3.status_code != 200:
             err_msg = ""
@@ -158,7 +203,7 @@ def _execute_attempt(
                     "longitude": lon
                 }
             },
-            timeout=22
+            timeout=16
         )
         if r4.status_code != 200:
             pe_code = ""
