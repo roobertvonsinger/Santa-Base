@@ -201,12 +201,20 @@ async def check_single_curp(curp: str, proxy: Optional[dict] = None) -> dict:
                                 txt = await pg.inner_text("body")
                                 if "requisitos" in txt.lower() or "sucursal" in txt.lower():
                                     return {"curp": curp, "status": "OFF", "detail": "Rechazo en pantalla (Sucursal)", "time": round(time.time()-t0, 1)}
-                                return {"curp": curp, "status": "OFF", "detail": "No avanzó de confirm-data", "time": round(time.time()-t0, 1)}
-                        
+                                # Ambiguo: no hay confirmacion bancaria explicita de rechazo, solo que el
+                                # sitio no transiciono dentro del tiempo de espera (variabilidad normal del
+                                # proxy residencial rotativo, verificado 2026-09-30: la misma pagina/CURP con
+                                # otra sesion de proxy si transiciona limpio). RETRY preserva el lead en vez
+                                # de quemarlo como OFF, consistente con el principio "Cero Falsos Negativos".
+                                return {"curp": curp, "status": "RETRY", "detail": "No avanzó de confirm-data (ambiguo, reintentar)", "time": round(time.time()-t0, 1)}
+
                         if "No cumples" in c or "PE1002" in c:
                             return {"curp": curp, "status": "OFF", "detail": "Modal PE1002", "time": round(time.time()-t0, 1)}
-                            
-                    return {"curp": curp, "status": "OFF", "detail": "Timeout en confirm-data", "time": round(time.time()-t0, 1)}
+
+                    # Mismo razonamiento: el sitio nunca llego a un estado reconocible (ni confirm-data, ni
+                    # confirm-contact, ni derivation-pro, ni el modal PE1002) dentro del tiempo de espera.
+                    # Sin confirmacion bancaria explicita -> RETRY, no OFF.
+                    return {"curp": curp, "status": "RETRY", "detail": "Timeout esperando confirm-data (ambiguo, reintentar)", "time": round(time.time()-t0, 1)}
                 finally:
                     if pg:
                         try:
