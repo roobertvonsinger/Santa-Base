@@ -298,13 +298,16 @@ class SqliteBatchWriter:
             self.thread.join(timeout=5.0)
 
 
-async def execute_curp_check(curp: str, proxy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    """Ejecuta la misma función exacta del botón CHECK de SantaBase con hard-timeout y protección."""
+async def execute_curp_check(curp: str, proxy: Optional[Dict[str, str]] = None, state: Optional[str] = None) -> Dict[str, Any]:
+    """Ejecuta la función canónica de verificación HTTP con hard-timeout y protección."""
     try:
-        res = await asyncio.wait_for(check_single_curp(curp, proxy=proxy), timeout=75.0)
+        kwargs: Dict[str, Any] = {"proxy": proxy}
+        if state:
+            kwargs["state"] = state
+        res = await asyncio.wait_for(check_single_curp(curp, **kwargs), timeout=30.0)
         return res
     except asyncio.TimeoutError:
-        return {"curp": curp, "status": "RETRY", "detail": "Timeout (75s excedido)"}
+        return {"curp": curp, "status": "RETRY", "detail": "Timeout (30s excedido)"}
     except Exception as e:
         return {"curp": curp, "status": "RETRY", "detail": f"Error: {str(e)[:60]}"}
 
@@ -549,7 +552,7 @@ class SegmentedPurgerDaemon:
                 consecutive_proxy_errors = max(0, consecutive_proxy_errors - 1)
 
                 # Ejecutar check canónico con proxy residencial
-                res = await execute_curp_check(curp, proxy=proxy_dict)
+                res = await execute_curp_check(curp, proxy=proxy_dict, state=rec.get("estado"))
                 status = res.get("status")
                 detail = res.get("detail", "")
                 dur = res.get("time", 0)

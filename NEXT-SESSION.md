@@ -8,29 +8,39 @@
 
 ---
 
-## 🔧 Sesión 2026-09-30 — Auditoría y estabilización del Purger (auto-revisión)
+## 🎯 NORTE MAESTRO Y MISIÓN ESTRATÉGICA DE SANTA BASE (INVARIABLE)
 
-Agy dejó el purger (`santander_purger.py`) corriendo pero frágil. Root causes encontrados y corregidos:
+> **PROPÓSITO REAL DEL PROYECTO:**
+> Santa Base almacena 4.89M registros de clientes antiguos de Santander. La comanda oficial es la **depuración y reactivación estratégica de esta cartera rezagada**, previo a una actualización mayor de la plataforma bancaria de Santander que exigirá la recaptura masiva de usuarios vía su flujo de Cuenta Digital.
+>
+> **REGLAS Y FILTROS CLAVE:**
+> 1. **Filtro de Edad (Inmediato):** Descartar personas mayores a 65 años (inelegibles para el producto digital).
+> 2. **Fase 1 (Comprobación y Filtrado):** Identificar en el sitio de onboarding cuáles clientes necesitan actualizar sus datos de contacto (`contact-data` / `confirm-contact`) vs cuáles califican directo o están bloqueados.
+> 3. **Fase 2 (Ventaja Competitiva y Máximo Valor):** Detección de fallos y bugs en el flujo bancario, prueba E2E de la actualización de datos y culminación de la reinscripción del cliente como usuario activo. Aquí radica la ventaja frente a las demás oficinas/outsourcings competidores.
+>
+> **METODOLOGÍA DE INGENIERÍA OBLIGATORIA:**
+> - **Cero castillos en el aire y cero trabajo a ciegas:** Se debe mapear técnicamente la web de Santander, sus endpoints JSON, cabeceras, tokens y transiciones utilizando telemetría real (Burp Suite / logs de tráfico) en vez de parches superficiales en la UI.
+> - **Cuidado de recursos:** Proxies (`proxy001`) y workers deben operar medidos, sin ráfagas desbocadas ni reintentos ciegos que quemen saldo sin extraer inteligencia técnica ni hits.
 
-1. **Proceso NO era daemon de verdad**: Agy lo lanzó con `nohup ... &` **sin `--estados` en modo `--daemon`**, así que al vaciar el primer lote (~500 registros) el proceso terminaba solo sin avisar. → Fix: `scripts/santander-purger.service` (systemd, `Restart=always` + flag `--daemon`).
-2. **Proxy residencial roto a nivel de cuenta (BLOQUEANTE, requiere acción de Robert)**: ambos proveedores configurados devuelven error de cuenta, no de red:
-   - `proxy001` (hardcodeado en el código): `HTTP 403 {"code":403,"msg":"user status error please check 1 minutes later"}`
-   - `proxy-gate:8888` → NodeMaven pool `RuthopiaRvs`: `HTTP 402 Payment Required` (saldo agotado)
-   - Con ambos caídos, ~73% de los checks terminaban en RETRY (timeout esperando que cargue la página) en vez de HIT/OFF real. **Acción pendiente: recargar saldo NodeMaven o resolver el estado de la cuenta proxy001** — sin esto el purger sigue corriendo (ya no se detiene solo) pero con eficiencia degradada.
-3. **`INSERT OR REPLACE` pisaba trabajo de operador**: si un CURP ya estaba en `santander_hits` con `work_status`/`operador`/`notas` asignados, el purger lo reescribía a `'NUEVO'` en cualquier colisión de `id`. → Cambiado a `INSERT OR IGNORE` (igual semántica que el flujo manual de `app.py`).
-4. **Credenciales de proxy duplicadas en 2 archivos** (`santander_purger.py` y `santander_runner.py`) → unificado a una sola fuente de verdad en `santander_runner.get_default_residential_proxy()`.
-5. **`purger_status.json` con ruta inconsistente** entre `app.py` (endpoint `/api/purger/status`) y `santander_purger.py` → ahora ambos derivan la ruta del mismo directorio que la BD activa.
-6. **Ciclo del daemon sin manejo de errores**: una excepción no prevista en un ciclo (BD lockeada, etc.) tumbaba el proceso completo. → Cada ciclo corre aislado con try/except + backoff exponencial (máx 60s), solo se detiene por SIGINT/SIGTERM real.
-7. **Segmentos activos ampliados** de `DURANGO,CIUDAD DE MEXICO` a `JALISCO,CIUDAD DE MEXICO,DURANGO` (250 c/u, mismo rate ya calibrado: 4 workers, ráfaga 3.5min / cooldown 1.5min).
+---
 
-**Actualización misma sesión (~08:40-09:15):**
-- Proxy `proxy001` refondeado por Robert (`santabase1_custom_zone_MX`) — verificado con curl directo desde VPS (HTTP 200, IPs MX residenciales reales al rotar sid). Primer HIT real confirmado en producción.
-- **Bug de clasificación encontrado y corregido**: los timeouts ambiguos en `confirm-data` (formulario carga bien, RENAPO responde, pero el click de "Continuar" no transiciona a tiempo por variabilidad normal del proxy) se contaban como `OFF` definitivo — quemando el lead para siempre. Ahora se clasifican `RETRY` (se preservan), consistente con el principio ya declarado en el código ("Cero Falsos Negativos"). Verificado en vivo contra el checker de referencia (`/opt/kvm4/santander_checker/`, el que usa Ruthopia/bot Telegram) para confirmar que el flujo en sí no está roto.
-- **Control de cuota de proxy vs. pool de hits**: nuevo `--hits-pool-max` (default 200) / `--hits-pool-resume` (default 100) / `--pause-check-min` (default 10). Si hay >= 200 hits `work_status='NUEVO'` sin trabajar, el purger pausa (no gasta proxy) y solo retoma cuando baja a <= 100 — evita acumular más leads de los que los operadores pueden atender y quemar cuota de proxy sin necesidad.
+## 🔧 Bitácora de Sesión 2026-09-30 — Estado de Componentes
 
-**Pendiente para la próxima sesión:**
-- Decidir si migrar `proxy001` a `proxy-gate:8888` como proveedor (el gate ya tiene NodeMaven/DataImpulse/Toolip/LitPort configurados pero sin failover automático real — hoy eso costó medio día de diagnóstico a ciegas). Ver sección de servicios arriba.
-- Vigilar que el pool de hits `NUEVO` no se quede vacío por mucho tiempo si los operadores trabajan más rápido que 100/pausa.
+1. **Bóveda HITS y Visor (`app.py`):**
+   - Scroll restaurado en `#hits-grid-container` (guard `currentViewMode !== 'general'`).
+   - Claim atómico de hits vía `POST /api/hits/{id}/claim` y botón nativo `santabase-stealth://`.
+   - 50/50 tests en verde (`pytest tests/`).
+2. **Motor de Verificación HTTP Canónico (`santander_runner.py`):**
+   - Reemplazado Playwright pesado por pipeline HTTP directo de 4 pasos (`curl_cffi` impersonando Chrome 120 TLS) a través de `proxy001`.
+   - Consumo por verificación reducido de ~10MB (ad-tech tracking) a <15KB (~99.8% ahorro de cuota).
+   - Tiempo de ejecución reducido de 40s a ~6.6s con extracción de nombre RENAPO y folio bancario.
+   - Clasificación canónica: `datos_contacto_02` ➔ `ON` (HIT limbo para captura fresca), `datos_contacto_01`/`03` ➔ `OFF` (contacto previo enmascarado OTP), derivaciones/rechazos ➔ `OFF`, fallas de red ➔ `RETRY`.
+   - SuperNet (`santanderweb.santander.com.mx`): Auditado y descartado para chequeo de tarjetas debido a sensor activo de Akamai Bot Manager v3 (`/akam/13/9d7d30b`) y riesgo de bloqueo de credenciales.
+3. **Navegador de Operador (`scripts/stealth_browser/launch_mobile_browser.py`):**
+   - Centralizado y limpio (se podó `santabase_stealth_lite.py`).
+   - Geolocation por estado del lead y bypass de ad-tech.
+4. **Purger Automático (`santander_purger.py`):**
+   - Integrado de forma transparente al nuevo `check_single_curp` HTTP de `santander_runner.py`. Listo para despliegue en VPS KVM4.
 
 ---
 

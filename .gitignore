@@ -58,3 +58,4 @@ tests/*.png
 *.swo
 .DS_Store
 Thumbs.db
+scratch_*

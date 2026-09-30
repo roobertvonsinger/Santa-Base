@@ -2,8 +2,9 @@ import asyncio
 import sys
 import time
 import json
-import re
-from playwright.async_api import async_playwright
+import random
+from typing import Optional, Dict, Any, List
+from curl_cffi import requests
 
 
 def format_short_reason(detail: str) -> str:
@@ -22,10 +23,6 @@ def format_short_reason(detail: str) -> str:
         return "Sucursal"
     return short[:15].strip()
 
-START_URL = "https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?utm_source=google-pmax&utm_medium=multi-channel&utm_campaign=MX_RCB_ACC_DEB_NA_AO_N2-PMAX_CVN_CVN_MLT_GAD_PMX_PMAX_NA_CPA&utm_content=multiple_bonif200"
-
-import random
-from typing import Optional, Dict, Any
 
 def get_default_residential_proxy() -> Dict[str, str]:
     # Cuenta refondeada 2026-09-30 (santabase1_custom_zone_MX). Verificado con curl directo desde
@@ -38,210 +35,215 @@ def get_default_residential_proxy() -> Dict[str, str]:
         "password": "Santabase123"
     }
 
-async def check_single_curp(curp: str, proxy: Optional[dict] = None) -> dict:
+
+def _check_curp_sync(
+    curp: str,
+    proxy: Optional[Dict[str, str]] = None,
+    state: str = "NUEVO LEON",
+    lat: str = "25.748",
+    lon: str = "-100.285"
+) -> Dict[str, Any]:
     t0 = time.time()
-    browser = None
-    ctx = None
-    pg = None
     if proxy is None:
         proxy = get_default_residential_proxy()
 
-    launch_kwargs: Dict[str, Any] = {
-        "headless": True,
-        "args": [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-web-security",
-            "--disable-site-isolation-trials",
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--no-zygote",
-            "--disable-extensions",
-            "--disable-background-networking",
-            "--window-size=430,932"
-        ]
+    srv = proxy.get("server", "").replace("http://", "").replace("https://", "")
+    usr = proxy.get("username", "")
+    pwd = proxy.get("password", "")
+    if usr and pwd:
+        proxy_url = f"http://{usr}:{pwd}@{srv}"
+    else:
+        proxy_url = f"http://{srv}"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "es-419,es;q=0.9",
+        "Referer": "https://onboarding.santander.com.mx/cuenta-digital-lite/personal-data",
+        "Origin": "https://onboarding.santander.com.mx",
+        "Content-Type": "application/json"
     }
-    if proxy and proxy.get("server"):
-        launch_kwargs["proxy"] = proxy
+
+    proxies = {"http": proxy_url, "https": proxy_url}
+    session = requests.Session(impersonate="chrome120", proxies=proxies)
 
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(**launch_kwargs)
+        # Paso 1: Inicializar sesión en onboarding
+        r1 = session.get(
+            "https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/session/init",
+            headers=headers,
+            timeout=10
+        )
+        if r1.status_code != 200:
+            return {
+                "curp": curp,
+                "status": "RETRY",
+                "detail": f"Init HTTP {r1.status_code}",
+                "time": round(time.time() - t0, 1)
+            }
+
+        # Paso 2: Aceptar términos y condiciones
+        r2 = session.post(
+            "https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/agreements/accept",
+            headers=headers,
+            json={
+                "data": {
+                    "privacy": True,
+                    "termsAndConditions": True,
+                    "originFlow": "/cuenta-digital-lite/personal-data"
+                }
+            },
+            timeout=10
+        )
+        if r2.status_code != 200:
+            return {
+                "curp": curp,
+                "status": "RETRY",
+                "detail": f"Agreements HTTP {r2.status_code}",
+                "time": round(time.time() - t0, 1)
+            }
+
+        # Paso 3: Consultar CURP en RENAPO
+        r3 = session.post(
+            "https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/curp/consulta",
+            headers=headers,
+            json={"data": {"birthCountry": "052", "mainPersonalIdentifier": curp}},
+            timeout=10
+        )
+        if r3.status_code != 200:
+            err_msg = ""
             try:
-                ctx = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
-                    viewport={"width": 430, "height": 932},
-                    device_scale_factor=2.5,
-                    is_mobile=True,
-                    has_touch=True,
-                    locale="es-MX",
-                    timezone_id="America/Mexico_City",
-                    geolocation={"latitude": 19.4326, "longitude": -99.1332},
-                    permissions=["geolocation"]
-                )
-                
-                # Cloak webdriver & emulate real mobile Chrome environment
-                await ctx.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                    window.chrome = { runtime: {} };
-                    Object.defineProperty(navigator, 'languages', { get: () => ['es-MX', 'es', 'en'] });
-                    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-                """)
+                err_msg = r3.json().get("notifications", [{}])[0].get("message", "")
+            except Exception:
+                pass
+            if "no encontrada" in err_msg.lower() or "invalida" in err_msg.lower():
+                return {
+                    "curp": curp,
+                    "status": "OFF",
+                    "detail": f"CURP inválida/no RENAPO ({r3.status_code})",
+                    "time": round(time.time() - t0, 1)
+                }
+            return {
+                "curp": curp,
+                "status": "RETRY",
+                "detail": f"Consulta HTTP {r3.status_code}",
+                "time": round(time.time() - t0, 1)
+            }
 
-                try:
-                    pg = await ctx.new_page()
-                    
-                    # CSP Bypass for Santander FAD
-                    async def handle_route(route):
-                        try:
-                            response = await route.fetch()
-                            headers = dict(response.headers)
-                            headers.pop("content-security-policy", None)
-                            headers.pop("content-security-policy-report-only", None)
-                            headers["access-control-allow-origin"] = "*"
-                            await route.fulfill(response=response, headers=headers)
-                        except Exception:
-                            try:
-                                await route.continue_()
-                            except Exception:
-                                pass
+        d3 = r3.json().get("data", {})
+        client_name = f"{d3.get('name', '')} {d3.get('lastName', '')} {d3.get('secondLastName', '')}".strip()
 
-                    try:
-                        await pg.route("**/santander_fad/**", handle_route)
-                        await pg.route("**/cuenta-digital-lite/**", handle_route)
-                    except Exception:
-                        pass
+        # Paso 4: Validar preexistencia contra el Core Bancario Santander
+        r4 = session.post(
+            "https://onboarding.santander.com.mx/api/v1/obu/case/registrada/N2/preexistence/validar",
+            headers=headers,
+            json={
+                "data": {
+                    "state": state,
+                    "os": "Android",
+                    "deviceVersion": "Android Google Pixel 9 15",
+                    "browserSize": "400x850",
+                    "resolutionScreen": "800x1700",
+                    "latitude": lat,
+                    "longitude": lon
+                }
+            },
+            timeout=12
+        )
+        if r4.status_code != 200:
+            return {
+                "curp": curp,
+                "status": "RETRY",
+                "detail": f"Preexistence HTTP {r4.status_code}",
+                "time": round(time.time() - t0, 1)
+            }
 
-                    await pg.goto(START_URL, wait_until="domcontentloaded", timeout=20000)
-                    
-                    # Click initial 'aquí' / esperar campo
-                    for _ in range(25):
-                        if await pg.locator("#onb-page-main-personal-identifier").count() > 0:
-                            break
-                        try:
-                            await pg.evaluate("document.querySelector('a.onb-link__target')?.click()")
-                        except Exception:
-                            pass
-                        await asyncio.sleep(0.6)
-                    
-                    await pg.wait_for_selector("#onb-page-main-personal-identifier", timeout=15000)
-                    inp = pg.locator("#onb-page-main-personal-identifier")
-                    await inp.click()
-                    await pg.keyboard.type(curp, delay=15)
-                    await asyncio.sleep(0.3)
-                    
-                    # Checkbox
-                    await pg.wait_for_selector(".onb-checkbox__container-check", timeout=8000)
-                    await pg.evaluate("document.querySelector('.onb-checkbox__container-check')?.click()")
-                    await asyncio.sleep(0.5)
-                    
-                    # Click real active Continuar button
-                    await pg.evaluate('''() => {
-                        const btns = Array.from(document.querySelectorAll('button')).filter(b => b.textContent && b.textContent.includes('Continuar'));
-                        const active = btns.find(b => !b.disabled && b.offsetParent !== null) || btns[btns.length - 1];
-                        if (active) active.click();
-                    }''')
-                    
-                    # Polling results
-                    for s in range(1, 35):
-                        await asyncio.sleep(1)
-                        try:
-                            u = pg.url
-                            c = await pg.content()
-                        except Exception:
-                            continue
-                        
-                        # Caso directo: Contacto preexistente
-                        if "confirm-contact" in u or "Tus datos de contacto" in c:
-                            return {"curp": curp, "status": "OFF", "detail": "Contacto preexistente (/confirm-contact)", "time": round(time.time()-t0, 1)}
-                        
-                        # Caso directo: LikeU Pro
-                        if "derivation-pro" in u or "LikeU Pro" in c or "Porque eres especial" in c:
-                            return {"curp": curp, "status": "OFF", "detail": "Derivación LikeU Pro (/derivation-pro)", "time": round(time.time()-t0, 1)}
-                        
-                        # Caso confirm-data
-                        if "confirm-data" in u:
-                            await pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                            for _ in range(12):
-                                await asyncio.sleep(0.7)
-                                dis = await pg.evaluate('''() => {
-                                    const btns = Array.from(document.querySelectorAll('button')).filter(b => b.textContent && b.textContent.includes('Continuar'));
-                                    const active = btns.find(b => !b.disabled && b.offsetParent !== null) || btns[btns.length - 1];
-                                    return active ? active.disabled : true;
-                                }''')
-                                if not dis:
-                                    break
-                            
-                            await pg.evaluate('''() => {
-                                const btns = Array.from(document.querySelectorAll('button')).filter(b => b.textContent && b.textContent.includes('Continuar'));
-                                const active = btns.find(b => !b.disabled && b.offsetParent !== null) || btns[btns.length - 1];
-                                if (active) active.click();
-                            }''')
-                            
-                            for s2 in range(1, 15):
-                                await asyncio.sleep(1)
-                                try:
-                                    u2 = pg.url
-                                    c2 = await pg.content()
-                                except Exception:
-                                    continue
-                                if "confirm-contact" in u2 or "Tus datos de contacto" in c2:
-                                    return {"curp": curp, "status": "OFF", "detail": "Contacto preexistente (/confirm-contact)", "time": round(time.time()-t0, 1)}
-                                if "derivation-pro" in u2 or "LikeU Pro" in c2 or "Porque eres especial" in c2:
-                                    return {"curp": curp, "status": "OFF", "detail": "Derivación LikeU Pro", "time": round(time.time()-t0, 1)}
-                                if "contact-data" in u2 or "Escribe tu celular" in c2:
-                                    return {"curp": curp, "status": "ON", "detail": "Elegible: avanzó a contact-data", "time": round(time.time()-t0, 1)}
-                                if "No cumples con los requisitos" in c2 or "PE1002" in c2 or "acuda a sucursal" in c2.lower():
-                                    return {"curp": curp, "status": "OFF", "detail": "No cumple requisitos (Modal PE1002)", "time": round(time.time()-t0, 1)}
-                            
-                            if "confirm-data" not in pg.url:
-                                return {"curp": curp, "status": "ON", "detail": f"Avanzó a {pg.url}", "time": round(time.time()-t0, 1)}
-                            else:
-                                txt = await pg.inner_text("body")
-                                if "requisitos" in txt.lower() or "sucursal" in txt.lower():
-                                    return {"curp": curp, "status": "OFF", "detail": "Rechazo en pantalla (Sucursal)", "time": round(time.time()-t0, 1)}
-                                # Ambiguo: no hay confirmacion bancaria explicita de rechazo, solo que el
-                                # sitio no transiciono dentro del tiempo de espera (variabilidad normal del
-                                # proxy residencial rotativo, verificado 2026-09-30: la misma pagina/CURP con
-                                # otra sesion de proxy si transiciona limpio). RETRY preserva el lead en vez
-                                # de quemarlo como OFF, consistente con el principio "Cero Falsos Negativos".
-                                return {"curp": curp, "status": "RETRY", "detail": "No avanzó de confirm-data (ambiguo, reintentar)", "time": round(time.time()-t0, 1)}
+        d4 = r4.json().get("data", {})
+        pantalla = d4.get("pantallaSiguiente")
+        folio = d4.get("folio")
+        dur = round(time.time() - t0, 1)
 
-                        if "No cumples" in c or "PE1002" in c:
-                            return {"curp": curp, "status": "OFF", "detail": "Modal PE1002", "time": round(time.time()-t0, 1)}
+        # Clasificación Canónica de Santander:
+        # datos_contacto_02 -> Requiere captura fresca de celular/correo (Limbo/Sin contacto) = HIT (ON)
+        # datos_contacto_01 / 03 -> Contacto preexistente enmascarado (OTP requerido a teléfono no disponible) = OFF
+        # derivacion_01 -> Derivación LikeU Pro comercial = OFF
+        # derivacion_02 / 03 / sucursal -> Rechazo o derivación a sucursal = OFF
+        if pantalla == "datos_contacto_02":
+            return {
+                "curp": curp,
+                "status": "ON",
+                "detail": "Elegible: avanzó a contact-data",
+                "pantallaSiguiente": pantalla,
+                "folio": folio,
+                "name": client_name,
+                "time": dur
+            }
+        elif pantalla in ("datos_contacto_01", "datos_contacto_03"):
+            return {
+                "curp": curp,
+                "status": "OFF",
+                "detail": "Contacto preexistente (/confirm-contact)",
+                "pantallaSiguiente": pantalla,
+                "folio": folio,
+                "time": dur
+            }
+        elif pantalla in ("derivation-pro", "derivacion_01"):
+            return {
+                "curp": curp,
+                "status": "OFF",
+                "detail": "Derivación LikeU Pro (/derivation-pro)",
+                "pantallaSiguiente": pantalla,
+                "folio": folio,
+                "time": dur
+            }
+        elif any(k in str(pantalla).lower() for k in ["derivacion", "sucursal", "rechazo"]):
+            return {
+                "curp": curp,
+                "status": "OFF",
+                "detail": f"Rechazo en pantalla ({pantalla})",
+                "pantallaSiguiente": pantalla,
+                "folio": folio,
+                "time": dur
+            }
+        else:
+            return {
+                "curp": curp,
+                "status": "RETRY",
+                "detail": f"Pantalla inesperada ({pantalla})",
+                "pantallaSiguiente": pantalla,
+                "folio": folio,
+                "time": dur
+            }
 
-                    # Mismo razonamiento: el sitio nunca llego a un estado reconocible (ni confirm-data, ni
-                    # confirm-contact, ni derivation-pro, ni el modal PE1002) dentro del tiempo de espera.
-                    # Sin confirmacion bancaria explicita -> RETRY, no OFF.
-                    return {"curp": curp, "status": "RETRY", "detail": "Timeout esperando confirm-data (ambiguo, reintentar)", "time": round(time.time()-t0, 1)}
-                finally:
-                    if pg:
-                        try:
-                            await asyncio.shield(pg.close())
-                        except Exception:
-                            pass
-            finally:
-                if ctx:
-                    try:
-                        await asyncio.shield(ctx.close())
-                    except Exception:
-                        pass
-                if browser:
-                    try:
-                        await asyncio.shield(browser.close())
-                    except Exception:
-                        pass
     except Exception as ex:
-        return {"curp": curp, "status": "ERROR", "detail": str(ex)[:80], "time": round(time.time()-t0, 1)}
+        return {
+            "curp": curp,
+            "status": "RETRY",
+            "detail": f"Excepción red: {str(ex)[:60]}",
+            "time": round(time.time() - t0, 1)
+        }
+    finally:
+        session.close()
+
+
+async def check_single_curp(
+    curp: str,
+    proxy: Optional[dict] = None,
+    state: str = "NUEVO LEON",
+    lat: str = "25.748",
+    lon: str = "-100.285"
+) -> dict:
+    """Verifica un CURP vía pipeline HTTP directo (Chrome 120 TLS) en ~5-7 segundos sin navegadores."""
+    return await asyncio.to_thread(_check_curp_sync, curp, proxy=proxy, state=state, lat=lat, lon=lon)
+
 
 async def run_batch(curps: list[str], concurrency: int = 3) -> list[dict]:
     queue = asyncio.Queue()
     for i, c in enumerate(curps, 1):
         queue.put_nowait((i, c))
-    
+
     results = [None] * len(curps)
-    
+
     async def worker():
         while not queue.empty():
             try:
@@ -251,12 +253,13 @@ async def run_batch(curps: list[str], concurrency: int = 3) -> list[dict]:
             res = await check_single_curp(curp)
             results[idx - 1] = res
             queue.task_done()
-    
+
     workers = [asyncio.create_task(worker()) for _ in range(min(concurrency, len(curps)))]
     await queue.join()
     for w in workers:
         w.cancel()
     return results
+
 
 def format_markdown_table(results: list[dict]) -> str:
     lines = [
@@ -265,12 +268,18 @@ def format_markdown_table(results: list[dict]) -> str:
         "|:---:|:---|:---:|:---|:---:|"
     ]
     for i, r in enumerate(results, 1):
-        badge = "ON ✅" if r["status"] == "ON" else f"{r['status']} ❌"
+        badge = "ON [OK]" if r["status"] == "ON" else f"{r['status']} [X]"
         lines.append(f"| {i} | `{r['curp']}` | **{badge}** | {r['detail']} | {r['time']}s |")
     return "\n".join(lines)
 
+
 if __name__ == "__main__":
-    test_curp = sys.argv[1] if len(sys.argv) > 1 else "OIRM840921HDFRMR05"
-    print(f"Testing CURP: {test_curp}...", flush=True)
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+    test_curp = sys.argv[1] if len(sys.argv) > 1 else "RAER880904HNLMLB01"
+    print(f"Testing CURP: {test_curp} via HTTP curl_cffi...", flush=True)
     res = asyncio.run(run_batch([test_curp]))
     print(format_markdown_table(res))
