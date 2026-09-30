@@ -147,3 +147,96 @@ def test_sqlite_batch_writer_with_hits():
     finally:
         if os.path.exists(path):
             os.remove(path)
+
+
+def test_sqlite_batch_writer_insert_or_ignore_preserves_operator_work():
+    """OR REPLACE pisaba work_status/operador/notas de un hit ya trabajado por un operador ante
+    colision de id. OR IGNORE debe preservarlos."""
+    from santander_purger import SqliteBatchWriter
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        conn = sqlite3.connect(path)
+        conn.execute("""
+            CREATE TABLE santander_records (
+                id INTEGER PRIMARY KEY, u6acct TEXT, curp TEXT, u6rfc TEXT, dmname TEXT,
+                estado TEXT, ciudad TEXT, codigo_postal TEXT, u6licrea TEXT,
+                fecha_nacimiento TEXT, genero TEXT, u6ladte1 TEXT, u6tel1 TEXT,
+                dmaddr1 TEXT, dmaddr2 TEXT, results TEXT
+            );
+        """)
+        conn.execute("INSERT INTO santander_records (id, curp, results) VALUES (1, 'CURP01', NULL)")
+        # Simula un hit ya trabajado por un operador (insertado antes, fuera del writer)
+        conn.execute("""
+            CREATE TABLE santander_hits (
+                id INTEGER PRIMARY KEY, u6acct TEXT, curp TEXT NOT NULL UNIQUE, u6rfc TEXT,
+                dmname TEXT, estado TEXT, ciudad TEXT, codigo_postal TEXT, u6licrea TEXT,
+                fecha_nacimiento TEXT, genero TEXT, telefono TEXT, direccion TEXT,
+                work_status TEXT DEFAULT 'NUEVO', operador TEXT, notas TEXT,
+                checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.execute("""
+            INSERT INTO santander_hits (id, curp, dmname, work_status, operador, notas)
+            VALUES (1, 'CURP01', 'JUAN PEREZ', 'CERRADO', 'Luisito', 'Cliente ya contactado')
+        """)
+        conn.commit()
+        conn.close()
+
+        writer = SqliteBatchWriter(path)
+        writer.start()
+        rec = {"id": 1, "curp": "CURP01", "dmname": "JUAN PEREZ"}
+        writer.enqueue(record_dict=rec, result="HIT", is_green=True)
+        writer.close()
+
+        conn = sqlite3.connect(path)
+        row = conn.execute("SELECT work_status, operador, notas FROM santander_hits WHERE id=1").fetchone()
+        conn.close()
+
+        assert row == ("CERRADO", "Luisito", "Cliente ya contactado")
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_count_unworked_hits_and_pool_thresholds():
+    from santander_purger import SegmentedPurgerDaemon
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        conn = sqlite3.connect(path)
+        conn.execute("""
+            CREATE TABLE santander_hits (
+                id INTEGER PRIMARY KEY, curp TEXT, work_status TEXT DEFAULT 'NUEVO'
+            );
+        """)
+        for i in range(1, 6):
+            conn.execute("INSERT INTO santander_hits (id, curp, work_status) VALUES (?, ?, 'NUEVO')", (i, f"CURP{i}"))
+        for i in range(6, 9):
+            conn.execute("INSERT INTO santander_hits (id, curp, work_status) VALUES (?, ?, 'CERRADO')", (i, f"CURP{i}"))
+        conn.commit()
+        conn.close()
+
+        daemon = SegmentedPurgerDaemon(db_path=path, hits_pool_max=5, hits_pool_resume=2)
+        # Solo cuenta work_status='NUEVO' (5), no los CERRADO (3)
+        assert daemon._count_unworked_hits() == 5
+        assert daemon._count_unworked_hits() >= daemon.hits_pool_max  # dispararia la pausa
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_count_unworked_hits_missing_table_returns_zero():
+    from santander_purger import SegmentedPurgerDaemon
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        daemon = SegmentedPurgerDaemon(db_path=path)
+        # Tabla santander_hits no existe todavia -> no debe tronar, debe devolver 0
+        assert daemon._count_unworked_hits() == 0
+    finally:
+        if os.path.exists(path):
+            os.remove(path)

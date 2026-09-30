@@ -325,7 +325,10 @@ class SegmentedPurgerDaemon:
         workers: int = 5,
         burst_sec: float = 210.0,    # 3.5 minutos
         cooldown_sec: float = 90.0,   # 1.5 minutos
-        daemon_mode: bool = False
+        daemon_mode: bool = False,
+        hits_pool_max: int = 200,      # pausa el gasto de proxies si hay >= esto de hits sin trabajar
+        hits_pool_resume: int = 100,   # solo retoma cuando el pool baja a esto o menos (histeresis anti-flip-flop)
+        pause_check_sec: float = 600.0  # cada cuanto re-checa el pool mientras esta pausado (10 min)
     ):
         self.db_path = db_path
         self.estado = estado
@@ -338,7 +341,11 @@ class SegmentedPurgerDaemon:
         self.burst_sec = burst_sec
         self.cooldown_sec = cooldown_sec
         self.daemon_mode = daemon_mode
-        
+        self.hits_pool_max = hits_pool_max
+        self.hits_pool_resume = hits_pool_resume
+        self.pause_check_sec = pause_check_sec
+        self._paused_for_pool = False  # histeresis: una vez pausado, no retoma hasta llegar a hits_pool_resume
+
         self.writer = SqliteBatchWriter(self.db_path)
         self.running = True
         self.stats = {
@@ -350,6 +357,19 @@ class SegmentedPurgerDaemon:
             "rate_per_min": 0.0,
             "active_workers": 0
         }
+
+    def _count_unworked_hits(self) -> int:
+        """Cuenta hits en santander_hits con work_status='NUEVO' (el pool real que ven los operadores,
+        sin contar los que ya estan EN_PROCESO/CERRADO/etc). Si la tabla aun no existe, cuenta 0."""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=15.0)
+            try:
+                cur = conn.execute("SELECT COUNT(*) FROM santander_hits WHERE work_status = 'NUEVO'")
+                return cur.fetchone()[0]
+            finally:
+                conn.close()
+        except Exception:
+            return 0
 
     def _write_status_file(self, extra: Optional[Dict[str, Any]] = None):
         """Emite telemetría viva a purger_status.json."""
@@ -382,6 +402,27 @@ class SegmentedPurgerDaemon:
         # agotar el segmento (COMPLETED).
         consecutive_cycle_errors = 0
         while self.running:
+            # Control de cuota: si ya hay suficiente inventario de hits sin trabajar (work_status='NUEVO'),
+            # pausar el gasto de proxy/CPU en vez de seguir acumulando mas de los que los operadores pueden
+            # atender. Histeresis (pausa en hits_pool_max, retoma en hits_pool_resume) evita prender/apagar
+            # el purger en cada re-chequeo cuando el conteo ronda el umbral.
+            unworked = self._count_unworked_hits()
+            if self._paused_for_pool and unworked > self.hits_pool_resume:
+                self.stats["state"] = "PAUSED_HITS_POOL"
+                self._write_status_file({"unworked_hits": unworked, "hits_pool_max": self.hits_pool_max, "hits_pool_resume": self.hits_pool_resume})
+                await self._sleep_interruptible(self.pause_check_sec)
+                continue
+            elif not self._paused_for_pool and unworked >= self.hits_pool_max:
+                self._paused_for_pool = True
+                print(f"[⏸️] Pool de hits sin trabajar llegó a {unworked} (>= {self.hits_pool_max}). Pausando para no quemar cuota de proxy.", flush=True)
+                self.stats["state"] = "PAUSED_HITS_POOL"
+                self._write_status_file({"unworked_hits": unworked, "hits_pool_max": self.hits_pool_max, "hits_pool_resume": self.hits_pool_resume})
+                await self._sleep_interruptible(self.pause_check_sec)
+                continue
+            elif self._paused_for_pool and unworked <= self.hits_pool_resume:
+                self._paused_for_pool = False
+                print(f"[▶️] Pool de hits bajó a {unworked} (<= {self.hits_pool_resume}). Reanudando.", flush=True)
+
             try:
                 keep_going = await self._run_one_cycle()
                 consecutive_cycle_errors = 0
@@ -401,6 +442,14 @@ class SegmentedPurgerDaemon:
         self.stats["state"] = "STOPPED"
         self._write_status_file()
         print(f"\n[🏁] Sesión finalizada | Total procesados: {self.stats['total_processed']} | HITS: {self.stats['hits']} | OFF: {self.stats['offs']}")
+
+    async def _sleep_interruptible(self, total_sec: float, step_sec: float = 5.0):
+        """Duerme en pasos cortos para que SIGINT/SIGTERM (self.running=False) corte la espera casi de
+        inmediato, en vez de bloquear hasta pause_check_sec completo (puede ser 10 min)."""
+        elapsed = 0.0
+        while elapsed < total_sec and self.running:
+            await asyncio.sleep(min(step_sec, total_sec - elapsed))
+            elapsed += step_sec
 
     async def _run_one_cycle(self) -> bool:
         """Un ciclo completo (lote -> ráfaga -> cooldown). Devuelve False si el daemon debe detenerse
@@ -589,6 +638,9 @@ def main():
     parser.add_argument("--burst-min", type=float, default=3.5, help="Duración de la ráfaga activa en minutos")
     parser.add_argument("--cooldown-min", type=float, default=1.5, help="Duración del enfriamiento en minutos")
     parser.add_argument("--daemon", action="store_true", help="Modo continuo desatendido (repite ráfagas indefinidamente)")
+    parser.add_argument("--hits-pool-max", type=int, default=200, help="Pausa el purger si hay >= esto de hits work_status=NUEVO sin trabajar (no quema cuota de proxy de más)")
+    parser.add_argument("--hits-pool-resume", type=int, default=100, help="Retoma solo cuando el pool de hits sin trabajar baja a esto o menos")
+    parser.add_argument("--pause-check-min", type=float, default=10.0, help="Cada cuánto re-checa el pool mientras está pausado (minutos)")
     parser.add_argument("--status", action="store_true", help="Consulta el estado actual de purger_status.json y sale")
     
     args = parser.parse_args()
@@ -612,7 +664,10 @@ def main():
         workers=args.workers,
         burst_sec=args.burst_min * 60,
         cooldown_sec=args.cooldown_min * 60,
-        daemon_mode=args.daemon
+        daemon_mode=args.daemon,
+        hits_pool_max=args.hits_pool_max,
+        hits_pool_resume=args.hits_pool_resume,
+        pause_check_sec=args.pause_check_min * 60
     )
     
     # Manejo de señales de parada limpia

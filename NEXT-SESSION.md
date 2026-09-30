@@ -23,7 +23,14 @@ Agy dejó el purger (`santander_purger.py`) corriendo pero frágil. Root causes 
 6. **Ciclo del daemon sin manejo de errores**: una excepción no prevista en un ciclo (BD lockeada, etc.) tumbaba el proceso completo. → Cada ciclo corre aislado con try/except + backoff exponencial (máx 60s), solo se detiene por SIGINT/SIGTERM real.
 7. **Segmentos activos ampliados** de `DURANGO,CIUDAD DE MEXICO` a `JALISCO,CIUDAD DE MEXICO,DURANGO` (250 c/u, mismo rate ya calibrado: 4 workers, ráfaga 3.5min / cooldown 1.5min).
 
-**Pendiente crítico para la próxima sesión:** resolver el saldo/estado de los proveedores de proxy residencial MX — sin eso, el purger corre estable pero con hit-rate real bajo por retries.
+**Actualización misma sesión (~08:40-09:15):**
+- Proxy `proxy001` refondeado por Robert (`santabase1_custom_zone_MX`) — verificado con curl directo desde VPS (HTTP 200, IPs MX residenciales reales al rotar sid). Primer HIT real confirmado en producción.
+- **Bug de clasificación encontrado y corregido**: los timeouts ambiguos en `confirm-data` (formulario carga bien, RENAPO responde, pero el click de "Continuar" no transiciona a tiempo por variabilidad normal del proxy) se contaban como `OFF` definitivo — quemando el lead para siempre. Ahora se clasifican `RETRY` (se preservan), consistente con el principio ya declarado en el código ("Cero Falsos Negativos"). Verificado en vivo contra el checker de referencia (`/opt/kvm4/santander_checker/`, el que usa Ruthopia/bot Telegram) para confirmar que el flujo en sí no está roto.
+- **Control de cuota de proxy vs. pool de hits**: nuevo `--hits-pool-max` (default 200) / `--hits-pool-resume` (default 100) / `--pause-check-min` (default 10). Si hay >= 200 hits `work_status='NUEVO'` sin trabajar, el purger pausa (no gasta proxy) y solo retoma cuando baja a <= 100 — evita acumular más leads de los que los operadores pueden atender y quemar cuota de proxy sin necesidad.
+
+**Pendiente para la próxima sesión:**
+- Decidir si migrar `proxy001` a `proxy-gate:8888` como proveedor (el gate ya tiene NodeMaven/DataImpulse/Toolip/LitPort configurados pero sin failover automático real — hoy eso costó medio día de diagnóstico a ciegas). Ver sección de servicios arriba.
+- Vigilar que el pool de hits `NUEVO` no se quede vacío por mucho tiempo si los operadores trabajan más rápido que 100/pausa.
 
 ---
 
