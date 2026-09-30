@@ -690,38 +690,51 @@ def browser_worker(proxy_mgr: ProxyManager, cmd_queue: queue.Queue, stop_event: 
                 ctx = b.new_context(**ctx_kwargs)
 
                 # Bloqueo de ad-tech de 3ros (Google Ads/remarketing, Facebook Pixel, Bing Ads,
-                # Adobe Target) — verificado 2026-09-30 vía network_debug.log: 613 de 1076
-                # requests en una sola sesión eran esto, CERO funcionales para el flujo de
-                # onboarding (sin reCAPTCHA de por medio). Cada uno pasa por el mismo proxy que
-                # el tráfico real, así que esto es lo que drena cuota y ralentiza la carga.
-                # maps.googleapis.com y dynatrace (1st-party de Santander) NO se tocan: el primero
-                # es el que resuelve la geolocation que mandamos, es funcional.
-                AD_TECH_BLOCKLIST = (
-                    "doubleclick.net",
-                    "googleadservices.com",
-                    "googlesyndication.com",
-                    "www.facebook.com",
-                    "connect.facebook.net",
-                    "bat.bing.com",
-                    "tt.omtrdc.net",
-                    "analytics.google.com",
-                    "adservice.google.com",
+                # Adobe Target) — verificado 2026-09-30 vía network_debug.log de la prueba real
+                # Nuevo León (CURP BAVY770723MNLRLL02): cada page_view (confirm-data, contact-data,
+                # derivation-pro) dispara 20-40 pixeles de golpe. CERO funcionales para el flujo
+                # de onboarding (sin reCAPTCHA de por medio). maps.googleapis.com y dynatrace
+                # (1st-party de Santander) NO se tocan: el primero resuelve la geolocation que
+                # mandamos, es funcional.
+                #
+                # DISEÑO (rediseñado 2026-09-30, root-cause de los stalls de ~16s en cada
+                # transición de página): un solo ctx.route("**/*", handler) con el filtro hecho
+                # en Python intercepta vía CDP Fetch.enable TODA petición del contexto — las
+                # 20-40 de ad-tech Y también fuentes/imágenes/scripts propios de Santander —
+                # cada una paga un roundtrip síncrono al proceso Python antes de poder seguir.
+                # Con 20-40 pixeles simultáneos eso serializa en el único hilo del browser_worker
+                # y ahí es donde se va el tiempo (verificado: la ventana de la ráfaga de pixeles
+                # en el log, 10:05:39-10:05:55, es exactamente el mismo ~16s que el stall
+                # reportado en confirm-data y derivation-pro). Chromium/CDP sí soporta filtrar
+                # por patrón ANTES de tocar Python (urlPattern en Fetch.enable) — por eso aquí se
+                # registra una ruta por dominio en vez de una sola catch-all: el 1st-party de
+                # Santander (y todo lo que no es ad-tech) nunca llega a hacer ese roundtrip.
+                AD_TECH_ABORT_PATTERNS = (
+                    "**doubleclick.net/**",
+                    "**googleadservices.com/**",
+                    "**googlesyndication.com/**",
+                    "**www.facebook.com/**",
+                    "**connect.facebook.net/**",
+                    "**bat.bing.com/**",
+                    "**tt.omtrdc.net/**",
+                    "**analytics.google.com/**",
+                    "**adservice.google.com/**",
+                    "**www.google.com/pagead/**",
+                    "**www.google.com/rmkt/**",
+                    "**www.google.com/ccm/**",  # visto en el log: no estaba en el blocklist viejo
                 )
 
-                def _handle_ad_block(route):
-                    url = route.request.url
-                    if any(dom in url for dom in AD_TECH_BLOCKLIST):
+                def _abort_route(route):
+                    try:
                         route.abort()
-                        return
-                    if "www.google.com/pagead/" in url or "www.google.com/rmkt/" in url:
-                        route.abort()
-                        return
-                    route.continue_()
+                    except Exception:
+                        pass
 
-                try:
-                    ctx.route("**/*", _handle_ad_block)
-                except Exception:
-                    pass
+                for _pattern in AD_TECH_ABORT_PATTERNS:
+                    try:
+                        ctx.route(_pattern, _abort_route)
+                    except Exception:
+                        pass
 
                 def _on_request(req):
                     if "santander" not in req.url:
