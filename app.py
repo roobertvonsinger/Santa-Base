@@ -784,6 +784,24 @@ def export_hits_csv(work_status: Optional[str] = None, _: None = Depends(require
     finally:
         conn.close()
 
+@app.get("/api/purger/status")
+def get_purger_status(_: None = Depends(require_auth)):
+    # Primera opción: el mismo directorio donde ya se resolvió DB_PATH (fuente única de verdad,
+    # coincide siempre con santander_purger.STATUS_JSON_PATH). El resto son fallbacks de compatibilidad.
+    status_paths = [
+        os.path.join(os.path.dirname(DB_PATH), "purger_status.json"),
+        "/opt/kvm4/apps/santander/data/purger_status.json",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "purger_status.json"))
+    ]
+    for sp in status_paths:
+        if os.path.exists(sp):
+            try:
+                with open(sp, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {"state": "STOPPED", "total_processed": 0, "hits": 0, "offs": 0, "retries": 0}
+
 @app.post("/api/batch_update")
 def batch_update(payload: BatchUpdatePayload, _: None = Depends(require_auth)):
     if not payload.items:

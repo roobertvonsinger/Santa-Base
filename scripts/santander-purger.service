@@ -1,0 +1,17 @@
+[Unit]
+Description=Santander Purger - Depuracion Segmentada Multi-Estado (Auto-Revision)
+After=network.target santander.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/kvm4/apps/santander
+ExecStart=/opt/kvm4/venv_santander/bin/python3 /opt/kvm4/apps/santander/santander_purger.py --estados "JALISCO:250,CIUDAD DE MEXICO:250,DURANGO:250" --workers 4 --burst-min 3.5 --cooldown-min 1.5 --prioridad mixto --daemon
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/opt/kvm4/apps/santander/data/purger.log
+StandardError=append:/opt/kvm4/apps/santander/data/purger.log
+
+[Install]
+WantedBy=multi-user.target

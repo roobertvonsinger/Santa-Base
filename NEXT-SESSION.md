@@ -2,7 +2,28 @@
 
 > **Estado:** Operativo en Producción (`https://2puty.tech/santander`)  
 > **Repositorio Oficial:** [github.com/roobertvonsinger/Santa-Base](https://github.com/roobertvonsinger/Santa-Base)  
-> **Última sincronización:** 2026-09-27  
+> **VPS:** Karen KVM4 (`2.25.98.162`) — `/opt/kvm4/apps/santander/` (código + `data/santander.db`, 4.9M registros, mismo directorio)  
+> **Servicios systemd en VPS:** `santander.service` (visor FastAPI, puerto 8055, Restart=always) + `santander-purger.service` (auto-revisión de CURPs, Restart=always, unit en `scripts/santander-purger.service`)  
+> **Última sincronización:** 2026-09-30  
+
+---
+
+## 🔧 Sesión 2026-09-30 — Auditoría y estabilización del Purger (auto-revisión)
+
+Agy dejó el purger (`santander_purger.py`) corriendo pero frágil. Root causes encontrados y corregidos:
+
+1. **Proceso NO era daemon de verdad**: Agy lo lanzó con `nohup ... &` **sin `--estados` en modo `--daemon`**, así que al vaciar el primer lote (~500 registros) el proceso terminaba solo sin avisar. → Fix: `scripts/santander-purger.service` (systemd, `Restart=always` + flag `--daemon`).
+2. **Proxy residencial roto a nivel de cuenta (BLOQUEANTE, requiere acción de Robert)**: ambos proveedores configurados devuelven error de cuenta, no de red:
+   - `proxy001` (hardcodeado en el código): `HTTP 403 {"code":403,"msg":"user status error please check 1 minutes later"}`
+   - `proxy-gate:8888` → NodeMaven pool `RuthopiaRvs`: `HTTP 402 Payment Required` (saldo agotado)
+   - Con ambos caídos, ~73% de los checks terminaban en RETRY (timeout esperando que cargue la página) en vez de HIT/OFF real. **Acción pendiente: recargar saldo NodeMaven o resolver el estado de la cuenta proxy001** — sin esto el purger sigue corriendo (ya no se detiene solo) pero con eficiencia degradada.
+3. **`INSERT OR REPLACE` pisaba trabajo de operador**: si un CURP ya estaba en `santander_hits` con `work_status`/`operador`/`notas` asignados, el purger lo reescribía a `'NUEVO'` en cualquier colisión de `id`. → Cambiado a `INSERT OR IGNORE` (igual semántica que el flujo manual de `app.py`).
+4. **Credenciales de proxy duplicadas en 2 archivos** (`santander_purger.py` y `santander_runner.py`) → unificado a una sola fuente de verdad en `santander_runner.get_default_residential_proxy()`.
+5. **`purger_status.json` con ruta inconsistente** entre `app.py` (endpoint `/api/purger/status`) y `santander_purger.py` → ahora ambos derivan la ruta del mismo directorio que la BD activa.
+6. **Ciclo del daemon sin manejo de errores**: una excepción no prevista en un ciclo (BD lockeada, etc.) tumbaba el proceso completo. → Cada ciclo corre aislado con try/except + backoff exponencial (máx 60s), solo se detiene por SIGINT/SIGTERM real.
+7. **Segmentos activos ampliados** de `DURANGO,CIUDAD DE MEXICO` a `JALISCO,CIUDAD DE MEXICO,DURANGO` (250 c/u, mismo rate ya calibrado: 4 workers, ráfaga 3.5min / cooldown 1.5min).
+
+**Pendiente crítico para la próxima sesión:** resolver el saldo/estado de los proveedores de proxy residencial MX — sin eso, el purger corre estable pero con hit-rate real bajo por retries.
 
 ---
 

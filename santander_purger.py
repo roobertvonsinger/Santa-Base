@@ -4,9 +4,9 @@ santander_purger.py — Motor de Depuración Segmentada de Alta Velocidad para S
 Arquitectura Dialéctica Mitigada (Smartplan v2):
 - Segmentación por Estado, Límite de Crédito (Casting Seguro) y Juventud (Fecha de Nacimiento).
 - Ráfagas (Burst) de 3.5 min y Enfriamiento (Cooldown) de 1.5 min.
-- Cero Rate Limit: Rotación obligatoria de proxies residenciales MX vía proxy-gate:8888 (sin fallback a IP fija).
+- Rotación de proxy residencial MX vía Proxy001 (sid aleatorio por request); ver santander_runner.get_default_residential_proxy.
 - Cero Falsos Negativos: Solo se descartan registros con confirmación bancaria explícita; fallas de red se preservan.
-- Cero Pérdida de Datos: Inserción directa e inmediata en tabla VIP `santander_greens` para registros HIT.
+- Cero Pérdida de Datos: Inserción directa e inmediata en tabla VIP `santander_hits` para registros HIT, sin pisar trabajo ya asignado por un operador.
 - Alta Concurrencia Playwright: Bloqueo de imágenes/fuentes/tracking, preservación de CSS para botones WebComponents.
 """
 
@@ -38,7 +38,9 @@ if not os.path.exists(DEFAULT_DB_PATH):
             DEFAULT_DB_PATH = dev_db
 
 PROXY_GATE_URL = "http://127.0.0.1:8888/proxy"
-STATUS_JSON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "purger_status.json"))
+# El status JSON vive siempre junto a la BD activa (mismo directorio que DEFAULT_DB_PATH ya resolvió),
+# nunca hardcodeado por separado — evita que purger y app.py apunten a rutas distintas en VPS.
+STATUS_JSON_PATH = os.path.join(os.path.dirname(DEFAULT_DB_PATH), "purger_status.json")
 START_URL = "https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?utm_source=google-pmax&utm_medium=multi-channel&utm_campaign=MX_RCB_ACC_DEB_NA_AO_N2-PMAX_CVN_CVN_MLT_GAD_PMX_PMAX_NA_CPA&utm_content=multiple_bonif200"
 
 
@@ -139,26 +141,13 @@ def parse_proxy_endpoint(data: Dict[str, Any]) -> Optional[Dict[str, str]]:
         
     return None
 
-import secrets
+from santander_runner import get_default_residential_proxy, check_single_curp, format_short_reason
 
 def fetch_proxy_from_gate(gate_url: str = PROXY_GATE_URL, timeout: float = 4.0) -> Optional[Dict[str, str]]:
-    """Obtiene una IP residencial mexicana viva desde proxy-gate:8888 o pool soberano NodeMaven."""
-    try:
-        req = urllib.request.Request(gate_url, headers={"User-Agent": "SantaPurger/2.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            parsed = parse_proxy_endpoint(data)
-            if parsed and "Ruthopia" not in parsed.get("username", ""):
-                return parsed
-    except Exception:
-        pass
-
-    rand_sid = secrets.token_hex(6)
-    return {
-        "server": "http://gate.nodemaven.com:8080",
-        "username": f"luiscael70_gmail_com-country-mx-sid-{rand_sid}-ttl-10m",
-        "password": "gg68gfdvd2"
-    }
+    """Obtiene una IP residencial mexicana rotatoria. Fuente única: santander_runner.get_default_residential_proxy
+    (antes esta credencial estaba hardcodeada y duplicada literal en este archivo y en santander_runner.py —
+    cualquier rotación de credenciales requería tocar 2 lugares; ahora hay una sola fuente de verdad)."""
+    return get_default_residential_proxy()
 
 
 # ==============================================================================
@@ -252,8 +241,12 @@ class SqliteBatchWriter:
                         a2 = rec.get("dmaddr2") or ""
                         dir_str = f"{a1} {a2}".strip()
                         
+                    # INSERT OR IGNORE (no OR REPLACE): si el id/curp ya existe en santander_hits porque un
+                    # operador ya lo trabajó (work_status/operador/notas asignados), NO se pisa. OR REPLACE
+                    # borraba la fila vieja y la reinsertaba con work_status='NUEVO', perdiendo ese trabajo
+                    # en cualquier carrera entre el purger y la edición manual del mismo id.
                     conn.execute("""
-                        INSERT OR REPLACE INTO santander_hits (
+                        INSERT OR IGNORE INTO santander_hits (
                             id, u6acct, curp, u6rfc, dmname, estado, ciudad, codigo_postal,
                             u6licrea, fecha_nacimiento, genero, telefono, direccion,
                             work_status, checked_at, updated_at
@@ -305,15 +298,13 @@ class SqliteBatchWriter:
             self.thread.join(timeout=5.0)
 
 
-from santander_runner import check_single_curp, format_short_reason
-
 async def execute_curp_check(curp: str, proxy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Ejecuta la misma función exacta del botón CHECK de SantaBase con hard-timeout y protección."""
     try:
-        res = await asyncio.wait_for(check_single_curp(curp, proxy=proxy), timeout=45.0)
+        res = await asyncio.wait_for(check_single_curp(curp, proxy=proxy), timeout=75.0)
         return res
     except asyncio.TimeoutError:
-        return {"curp": curp, "status": "RETRY", "detail": "Timeout (45s excedido)"}
+        return {"curp": curp, "status": "RETRY", "detail": "Timeout (75s excedido)"}
     except Exception as e:
         return {"curp": curp, "status": "RETRY", "detail": f"Error: {str(e)[:60]}"}
 
@@ -384,163 +375,197 @@ class SegmentedPurgerDaemon:
         elif self.estado:
             print(f"[*] Filtros: Estado='{self.estado}' | Min Crédito=${self.min_credito:,} | Nacidos >= '{self.born_after or 'Cualquiera'}'")
 
+        # Info sensible de mucho peso operativo (4.9M registros): un error transitorio en un solo
+        # ciclo (BD lockeada, red caída, excepción no prevista en un worker) NO debe tumbar el proceso
+        # completo. Cada ciclo corre aislado en try/except; si falla, se loguea, se espera con backoff
+        # y se reintenta — el daemon solo se detiene por SIGINT/SIGTERM (self.running=False) o por
+        # agotar el segmento (COMPLETED).
+        consecutive_cycle_errors = 0
         while self.running:
-            # 1. Obtener lote de candidatos desde SQLite
-            conn = sqlite3.connect(self.db_path, timeout=30.0)
-            rows = []
-            if self.estados:
-                quotas = parse_estados_quotas(self.estados)
-                for edo, q in quotas.items():
-                    sql, params = build_segment_query(
-                        estado=edo,
-                        min_credito=self.min_credito,
-                        born_after=self.born_after,
-                        prioridad=self.prioridad,
-                        limit=q
-                    )
-                    sub_rows = conn.execute(sql, params).fetchall()
-                    rows.extend(sub_rows)
-                    print(f"  --> {edo}: {len(sub_rows)}/{q} registros cargados")
-            else:
+            try:
+                keep_going = await self._run_one_cycle()
+                consecutive_cycle_errors = 0
+                if not keep_going:
+                    break
+            except Exception as e:
+                consecutive_cycle_errors += 1
+                backoff = min(60.0, 5.0 * consecutive_cycle_errors)
+                print(f"[💥 CYCLE ERROR] Ciclo falló ({consecutive_cycle_errors}x consecutivas): {e} | reintentando en {backoff:.0f}s", file=sys.stderr, flush=True)
+                self.stats["state"] = "ERROR"
+                self._write_status_file({"last_error": str(e)[:200], "consecutive_cycle_errors": consecutive_cycle_errors})
+                if not self.running:
+                    break
+                await asyncio.sleep(backoff)
+
+        self.writer.close()
+        self.stats["state"] = "STOPPED"
+        self._write_status_file()
+        print(f"\n[🏁] Sesión finalizada | Total procesados: {self.stats['total_processed']} | HITS: {self.stats['hits']} | OFF: {self.stats['offs']}")
+
+    async def _run_one_cycle(self) -> bool:
+        """Un ciclo completo (lote -> ráfaga -> cooldown). Devuelve False si el daemon debe detenerse
+        (segmento agotado, o no es --daemon y ya no queda cola), True para continuar en el while de run()."""
+        # 1. Obtener lote de candidatos desde SQLite
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        rows = []
+        if self.estados:
+            quotas = parse_estados_quotas(self.estados)
+            for edo, q in quotas.items():
                 sql, params = build_segment_query(
-                    estado=self.estado,
+                    estado=edo,
                     min_credito=self.min_credito,
                     born_after=self.born_after,
                     prioridad=self.prioridad,
-                    limit=self.limit
+                    limit=q
                 )
-                rows = conn.execute(sql, params).fetchall()
-            conn.close()
+                sub_rows = conn.execute(sql, params).fetchall()
+                rows.extend(sub_rows)
+                print(f"  --> {edo}: {len(sub_rows)}/{q} registros cargados")
+        else:
+            sql, params = build_segment_query(
+                estado=self.estado,
+                min_credito=self.min_credito,
+                born_after=self.born_after,
+                prioridad=self.prioridad,
+                limit=self.limit
+            )
+            rows = conn.execute(sql, params).fetchall()
+        conn.close()
 
-            if not rows:
-                print("[✓] No hay más registros pendientes en este segmento.")
-                self.stats["state"] = "COMPLETED"
-                self._write_status_file()
-                break
+        if not rows:
+            print("[✓] No hay más registros pendientes en este segmento.")
+            self.stats["state"] = "COMPLETED"
+            self._write_status_file()
+            return False
 
-            print(f"\n[🚀] Lote de {len(rows)} registros obtenido. Iniciando ráfaga ({self.burst_sec/60:.1f} min)...")
-            t_burst_start = time.time()
-            self.stats["state"] = "BURST"
+        print(f"\n[🚀] Lote de {len(rows)} registros obtenido. Iniciando ráfaga ({self.burst_sec/60:.1f} min)...")
+        t_burst_start = time.time()
+        self.stats["state"] = "BURST"
 
-            # Cola de registros para la ráfaga
-            queue_records = asyncio.Queue()
-            for r in rows:
-                queue_records.put_nowait(r)
-                    
-            consecutive_proxy_errors = 0
-            
-            # Worker individual
-            async def worker_loop(w_idx: int):
-                nonlocal consecutive_proxy_errors
-                while not queue_records.empty() and self.running:
-                    # Verificar tiempo de ráfaga
-                    if time.time() - t_burst_start >= self.burst_sec:
-                        break
-                        
-                    # Circuit Breaker: si hay 3 fallas de proxy seguidas, pausar
-                    if consecutive_proxy_errors >= 3:
-                        await asyncio.sleep(5)
-                        continue
-                        
-                    r = await queue_records.get()
-                    rec = {
-                        "id": r[0],
-                        "u6acct": r[1],
-                        "curp": r[2],
-                        "u6rfc": r[3],
-                        "dmname": r[4],
-                        "estado": r[5],
-                        "ciudad": r[6],
-                        "codigo_postal": r[7],
-                        "u6licrea": r[8],
-                        "fecha_nacimiento": r[9],
-                        "genero": r[10],
-                        "u6ladte1": r[11],
-                        "u6tel1": r[12],
-                        "dmaddr1": r[13],
-                        "dmaddr2": r[14]
-                    }
-                    rid = rec["id"]
-                    curp = rec["curp"]
-                    name = rec["dmname"]
-                    lim = rec["u6licrea"]
-                    
-                    # Obtener proxy residencial fresco de proxy-gate:8888
-                    proxy_dict = fetch_proxy_from_gate()
-                    if not proxy_dict:
-                        consecutive_proxy_errors += 1
-                        await asyncio.sleep(4.0)
-                        queue_records.put_nowait(r)
-                        queue_records.task_done()
-                        continue
-                        
-                    consecutive_proxy_errors = max(0, consecutive_proxy_errors - 1)
-                    
-                    # Ejecutar check canónico con proxy residencial
-                    res = await execute_curp_check(curp, proxy=proxy_dict)
-                    status = res.get("status")
-                    detail = res.get("detail", "")
-                    dur = res.get("time", 0)
-                    
-                    if status == "ON":
-                        self.stats["hits"] += 1
-                        self.stats["total_processed"] += 1
-                        self.writer.enqueue(rec, "HIT", is_green=True)
-                        print(f"  [🟢 HIT #{self.stats['hits']}] ID:{rid} | {curp} | {name} | ${lim} | ({dur}s)", flush=True)
-                    elif status == "OFF":
-                        self.stats["offs"] += 1
-                        self.stats["total_processed"] += 1
-                        short_detail = f"OFF: {detail[:20]}"
-                        self.writer.enqueue(rec, short_detail, is_green=False)
-                        print(f"  [🔴 OFF] ID:{rid} | {curp} | {detail} ({dur}s)", flush=True)
-                    else:
-                        # RETRY: No quemar lead, no escribir en BD
-                        self.stats["retries"] += 1
-                        print(f"  [⚠️ RETRY] ID:{rid} | {curp} | {detail}", flush=True)
-                        
-                    queue_records.task_done()
-                
-            # Lanzar workers paralelos
-            tasks = [asyncio.create_task(worker_loop(i)) for i in range(self.workers)]
-            
-            # Monitor de progreso en ráfaga
-            while any(not t.done() for t in tasks):
-                elapsed = time.time() - t_burst_start
-                remain = max(0.0, self.burst_sec - elapsed)
-                if elapsed > 0:
-                    self.stats["rate_per_min"] = round((self.stats["total_processed"] / elapsed) * 60, 1)
-                self._write_status_file({"burst_remaining_sec": round(remain, 1)})
-                
-                if remain <= 0:
+        # Cola de registros para la ráfaga
+        queue_records = asyncio.Queue()
+        for r in rows:
+            queue_records.put_nowait(r)
+
+        consecutive_proxy_errors = 0
+
+        # Worker individual
+        async def worker_loop(w_idx: int):
+            nonlocal consecutive_proxy_errors
+            while not queue_records.empty() and self.running:
+                # Verificar tiempo de ráfaga
+                if time.time() - t_burst_start >= self.burst_sec:
                     break
-                await asyncio.sleep(3.0)
-                
-            # Cancelar y esperar terminación de workers
-            for t in tasks:
-                if not t.done():
-                    t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # 3. Fase de Enfriamiento (Cooldown) y Limpieza de Huérfanos
-            if not self.daemon_mode and queue_records.empty():
-                break
 
-            self.stats["state"] = "COOLDOWN"
-            print(f"\n[❄️] Ráfaga concluida. Enfriando sockets por {self.cooldown_sec:.0f}s...")
-            
-            # Zombie Watchdog
-            if os.name == 'posix':
+                # Circuit Breaker: si hay 3 fallas de proxy seguidas, pausar
+                if consecutive_proxy_errors >= 3:
+                    await asyncio.sleep(5)
+                    continue
+
+                r = await queue_records.get()
+                rec = {
+                    "id": r[0],
+                    "u6acct": r[1],
+                    "curp": r[2],
+                    "u6rfc": r[3],
+                    "dmname": r[4],
+                    "estado": r[5],
+                    "ciudad": r[6],
+                    "codigo_postal": r[7],
+                    "u6licrea": r[8],
+                    "fecha_nacimiento": r[9],
+                    "genero": r[10],
+                    "u6ladte1": r[11],
+                    "u6tel1": r[12],
+                    "dmaddr1": r[13],
+                    "dmaddr2": r[14]
+                }
+                rid = rec["id"]
+                curp = rec["curp"]
+                name = rec["dmname"]
+                lim = rec["u6licrea"]
+
+                # Obtener proxy residencial fresco (ver santander_runner.get_default_residential_proxy)
                 try:
-                    import subprocess
-                    subprocess.run(["pkill", "-f", "chromium.*--headless"], check=False)
+                    proxy_dict = fetch_proxy_from_gate()
                 except Exception:
-                    pass
-                    
-            t_cool_start = time.time()
-            while time.time() - t_cool_start < self.cooldown_sec and self.running:
-                cool_remain = max(0.0, self.cooldown_sec - (time.time() - t_cool_start))
-                self._write_status_file({"cooldown_remaining_sec": round(cool_remain, 1)})
-                await asyncio.sleep(2.0)
+                    proxy_dict = None
+                if not proxy_dict:
+                    consecutive_proxy_errors += 1
+                    await asyncio.sleep(4.0)
+                    queue_records.put_nowait(r)
+                    queue_records.task_done()
+                    continue
+
+                consecutive_proxy_errors = max(0, consecutive_proxy_errors - 1)
+
+                # Ejecutar check canónico con proxy residencial
+                res = await execute_curp_check(curp, proxy=proxy_dict)
+                status = res.get("status")
+                detail = res.get("detail", "")
+                dur = res.get("time", 0)
+
+                if status == "ON":
+                    self.stats["hits"] += 1
+                    self.stats["total_processed"] += 1
+                    self.writer.enqueue(rec, "HIT", is_green=True)
+                    print(f"  [🟢 HIT #{self.stats['hits']}] ID:{rid} | {curp} | {name} | ${lim} | ({dur}s)", flush=True)
+                elif status == "OFF":
+                    self.stats["offs"] += 1
+                    self.stats["total_processed"] += 1
+                    short_detail = f"OFF: {detail[:20]}"
+                    self.writer.enqueue(rec, short_detail, is_green=False)
+                    print(f"  [🔴 OFF] ID:{rid} | {curp} | {detail} ({dur}s)", flush=True)
+                else:
+                    # RETRY: No quemar lead, no escribir en BD
+                    self.stats["retries"] += 1
+                    print(f"  [⚠️ RETRY] ID:{rid} | {curp} | {detail}", flush=True)
+
+                queue_records.task_done()
+
+        # Lanzar workers paralelos
+        tasks = [asyncio.create_task(worker_loop(i)) for i in range(self.workers)]
+
+        # Monitor de progreso en ráfaga
+        while any(not t.done() for t in tasks):
+            elapsed = time.time() - t_burst_start
+            remain = max(0.0, self.burst_sec - elapsed)
+            if elapsed > 0:
+                self.stats["rate_per_min"] = round((self.stats["total_processed"] / elapsed) * 60, 1)
+            self._write_status_file({"burst_remaining_sec": round(remain, 1)})
+
+            if remain <= 0:
+                break
+            await asyncio.sleep(3.0)
+
+        # Cancelar y esperar terminación de workers
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 3. Fase de Enfriamiento (Cooldown) y Limpieza de Huérfanos
+        if not self.daemon_mode and queue_records.empty():
+            return False
+
+        self.stats["state"] = "COOLDOWN"
+        print(f"\n[❄️] Ráfaga concluida. Enfriando sockets por {self.cooldown_sec:.0f}s...")
+
+        # Zombie Watchdog
+        if os.name == 'posix':
+            try:
+                import subprocess
+                subprocess.run(["pkill", "-f", "chromium.*--headless"], check=False)
+            except Exception:
+                pass
+
+        t_cool_start = time.time()
+        while time.time() - t_cool_start < self.cooldown_sec and self.running:
+            cool_remain = max(0.0, self.cooldown_sec - (time.time() - t_cool_start))
+            self._write_status_file({"cooldown_remaining_sec": round(cool_remain, 1)})
+            await asyncio.sleep(2.0)
+
+        return True
 
         self.writer.close()
         self.stats["state"] = "STOPPED"

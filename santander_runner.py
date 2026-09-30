@@ -24,15 +24,15 @@ def format_short_reason(detail: str) -> str:
 
 START_URL = "https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?utm_source=google-pmax&utm_medium=multi-channel&utm_campaign=MX_RCB_ACC_DEB_NA_AO_N2-PMAX_CVN_CVN_MLT_GAD_PMX_PMAX_NA_CPA&utm_content=multiple_bonif200"
 
-import secrets
+import random
 from typing import Optional, Dict, Any
 
 def get_default_residential_proxy() -> Dict[str, str]:
-    sid = secrets.token_hex(6)
+    sid = random.randint(10000000, 99999999)
     return {
-        "server": "http://gate.nodemaven.com:8080",
-        "username": f"luiscael70_gmail_com-country-mx-sid-{sid}-ttl-10m",
-        "password": "gg68gfdvd2"
+        "server": "http://us.proxy001.com:7878",
+        "username": f"zgvuod743022_custom_zone_MX_ssid_{sid}_time_10",
+        "password": "pwd639719"
     }
 
 async def check_single_curp(curp: str, proxy: Optional[dict] = None) -> dict:
