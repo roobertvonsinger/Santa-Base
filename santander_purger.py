@@ -634,7 +634,7 @@ def main():
     parser.add_argument("--estado", default=None, help="Filtrar por un estado canónico único (ej. 'CIUDAD DE MEXICO')")
     parser.add_argument("--estados", default=None, help="Lote multi-estado con cuotas (ej. 'DURANGO:250,CIUDAD DE MEXICO:250')")
     parser.add_argument("--min-credito", type=int, default=0, help="Límite de crédito mínimo en pesos")
-    parser.add_argument("--born-after", default=None, help="Fecha de nacimiento mínima YYYY-MM-DD (ej. '1985-01-01')")
+    parser.add_argument("--born-after", default="1962-01-01", help="Fecha de nacimiento mínima YYYY-MM-DD (default: '1962-01-01', regla <65 años)")
     parser.add_argument("--prioridad", choices=["credito_desc", "edad_desc", "mixto"], default="credito_desc", help="Criterio de ordenación")
     parser.add_argument("--limit", type=int, default=100, help="Cantidad de registros a procesar por ráfaga")
     parser.add_argument("--workers", type=int, default=5, help="Cantidad de navegadores paralelos (default: 5)")

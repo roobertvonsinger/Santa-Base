@@ -112,15 +112,25 @@ def _check_curp_sync(
         )
         if r3.status_code != 200:
             err_msg = ""
+            err_code = ""
             try:
-                err_msg = r3.json().get("notifications", [{}])[0].get("message", "")
+                notif = r3.json().get("notifications", [{}])[0]
+                err_msg = notif.get("message", "")
+                err_code = notif.get("code", "")
             except Exception:
                 pass
-            if "no encontrada" in err_msg.lower() or "invalida" in err_msg.lower():
+
+            # Errores definitivos de RENAPO/Santander: CURP inválida (400 / OB-ORQ-05), usuario bloqueado (423 / OB-ORQ-06)
+            is_permanent_reject = (
+                r3.status_code in (400, 404, 422, 423)
+                or err_code in ("OB-ORQ-05", "OB-ORQ-06")
+                or any(k in err_msg.lower() for k in ["invalid", "invalida", "blocked", "bloqueado", "no encontrada", "not found"])
+            )
+            if is_permanent_reject:
                 return {
                     "curp": curp,
                     "status": "OFF",
-                    "detail": f"CURP inválida/no RENAPO ({r3.status_code})",
+                    "detail": f"Rechazo RENAPO/Bloqueado ({r3.status_code}: {err_code or err_msg})",
                     "time": round(time.time() - t0, 1)
                 }
             return {
