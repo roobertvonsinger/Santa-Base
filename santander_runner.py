@@ -72,7 +72,7 @@ def _check_curp_sync(
         r1 = session.get(
             "https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/session/init",
             headers=headers,
-            timeout=10
+            timeout=12
         )
         if r1.status_code != 200:
             return {
@@ -93,7 +93,7 @@ def _check_curp_sync(
                     "originFlow": "/cuenta-digital-lite/personal-data"
                 }
             },
-            timeout=10
+            timeout=12
         )
         if r2.status_code != 200:
             return {
@@ -108,7 +108,7 @@ def _check_curp_sync(
             "https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/curp/consulta",
             headers=headers,
             json={"data": {"birthCountry": "052", "mainPersonalIdentifier": curp}},
-            timeout=10
+            timeout=15
         )
         if r3.status_code != 200:
             err_msg = ""
@@ -148,7 +148,7 @@ def _check_curp_sync(
                     "longitude": lon
                 }
             },
-            timeout=12
+            timeout=22
         )
         if r4.status_code != 200:
             return {
