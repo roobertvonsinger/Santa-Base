@@ -28,11 +28,14 @@ import random
 from typing import Optional, Dict, Any
 
 def get_default_residential_proxy() -> Dict[str, str]:
+    # Cuenta refondeada 2026-09-30 (santabase1_custom_zone_MX). Verificado con curl directo desde
+    # Karen VPS: HTTP 200 contra onboarding.santander.com.mx, sid rotativo confirma IPs residenciales
+    # MX distintas por request (187.188.x, 189.183.x). Fuente única: purger e app.py la importan de aquí.
     sid = random.randint(10000000, 99999999)
     return {
         "server": "http://us.proxy001.com:7878",
-        "username": f"zgvuod743022_custom_zone_MX_ssid_{sid}_time_10",
-        "password": "pwd639719"
+        "username": f"santabase1_custom_zone_MX_ssid_{sid}_time_10",
+        "password": "Santabase123"
     }
 
 async def check_single_curp(curp: str, proxy: Optional[dict] = None) -> dict:
