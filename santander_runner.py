@@ -203,7 +203,7 @@ def _execute_attempt(
                     "longitude": lon
                 }
             },
-            timeout=16
+            timeout=28
         )
         if r4.status_code != 200:
             pe_code = ""

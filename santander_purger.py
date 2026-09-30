@@ -304,10 +304,10 @@ async def execute_curp_check(curp: str, proxy: Optional[Dict[str, str]] = None, 
         kwargs: Dict[str, Any] = {"proxy": proxy}
         if state:
             kwargs["state"] = state
-        res = await asyncio.wait_for(check_single_curp(curp, **kwargs), timeout=45.0)
+        res = await asyncio.wait_for(check_single_curp(curp, **kwargs), timeout=55.0)
         return res
     except asyncio.TimeoutError:
-        return {"curp": curp, "status": "RETRY", "detail": "Timeout (45s excedido)"}
+        return {"curp": curp, "status": "RETRY", "detail": "Timeout (55s excedido)"}
     except Exception as e:
         return {"curp": curp, "status": "RETRY", "detail": f"Error: {str(e)[:60]}"}
 
