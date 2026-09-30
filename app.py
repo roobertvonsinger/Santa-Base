@@ -784,7 +784,7 @@ def export_hits_csv(work_status: Optional[str] = None, _: None = Depends(require
             params.append(work_status.strip().upper())
 
         cur.execute(f"""
-            SELECT id, curp, u6rfc, dmname, u6licrea, telefono, estado, ciudad,
+            SELECT id, u6acct, curp, u6rfc, dmname, u6licrea, telefono, estado, ciudad,
                    codigo_postal, direccion, work_status, operador, notas, checked_at
             FROM santander_hits
             {where_sql}
@@ -793,7 +793,7 @@ def export_hits_csv(work_status: Optional[str] = None, _: None = Depends(require
         rows = [dict(r) for r in cur.fetchall()]
 
         headers = [
-            "id", "curp", "u6rfc", "dmname", "u6licrea", "telefono", "estado", "ciudad",
+            "id", "u6acct", "curp", "u6rfc", "dmname", "u6licrea", "telefono", "estado", "ciudad",
             "codigo_postal", "direccion", "work_status", "operador", "notas", "checked_at"
         ]
         csv_lines = [",".join(headers)]
@@ -2925,12 +2925,14 @@ HTML_CONTENT = """<!DOCTYPE html>
           <tr>
             <th class="excel-header row-num-header" style="width: 40px; text-align: center;">#</th>
             <th class="excel-header" style="width: 140px;">GESTIÓN</th>
+            <th class="excel-header" style="width: 170px;">TARJETA</th>
             <th class="excel-header" style="width: 200px;">CURP (ONBOARDING)</th>
             <th class="excel-header" style="width: 220px;">NOMBRE COMPLETO</th>
             <th class="excel-header" style="width: 125px; text-align: right;">LÍMITE CRÉDITO</th>
             <th class="excel-header" style="width: 125px;">TELÉFONO</th>
-            <th class="excel-header" style="width: 140px;">ESTADO</th>
-            <th class="excel-header" style="width: 140px;">CIUDAD</th>
+            <th class="excel-header" style="width: 130px;">ESTADO</th>
+            <th class="excel-header" style="width: 130px;">CIUDAD</th>
+            <th class="excel-header" style="width: 80px; text-align: center;">CP</th>
             <th class="excel-header" style="width: 280px;">DIRECCIÓN</th>
             <th class="excel-header" style="width: 110px;">OPERADOR</th>
             <th class="excel-header" style="width: 220px;">NOTAS</th>
@@ -2938,7 +2940,7 @@ HTML_CONTENT = """<!DOCTYPE html>
           </tr>
         </thead>
         <tbody id="hits-table-body">
-          <tr><td colspan="12" style="text-align:center; padding: 40px; color: var(--text-muted);">Cargando Bóveda de HITS...</td></tr>
+          <tr><td colspan="14" style="text-align:center; padding: 40px; color: var(--text-muted);">Cargando Bóveda de HITS...</td></tr>
         </tbody>
       </table>
     </div>
@@ -4892,7 +4894,7 @@ function exportCsv() {
         document.getElementById('btn-hits-next').disabled = data.page >= data.total_pages;
 
         if (currentHits.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="12" style="text-align:center; padding: 40px; color: var(--text-muted);">No hay registros en la Bóveda de HITS con los filtros actuales.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="14" style="text-align:center; padding: 40px; color: var(--text-muted);">No hay registros en la Bóveda de HITS con los filtros actuales.</td></tr>';
           return;
         }
 
@@ -4900,6 +4902,8 @@ function exportCsv() {
         currentHits.forEach((h, idx) => {
           const rowNum = (hitsPage - 1) * hitsLimit + idx + 1;
           const curpEsc = escapeHtml(h.curp || '');
+          const cardEsc = escapeHtml(h.u6acct || '');
+          const cpEsc = escapeHtml(h.codigo_postal || '');
           const phoneEsc = escapeHtml(h.telefono || '');
           const limNum = parseInt(h.u6licrea, 10);
           const limFormatted = !isNaN(limNum) ? '$' + limNum.toLocaleString('es-MX') : '$' + (h.u6licrea || '0');
@@ -4919,6 +4923,9 @@ function exportCsv() {
                   <option value="DESCARTADO" ${h.work_status === 'DESCARTADO' ? 'selected' : ''}>⚪ DESCARTADO</option>
                 </select>
               </td>
+              <td style="font-family: var(--font-mono); font-weight: 600; color: #60a5fa;">
+                ${cardEsc ? `<span class="copyable-text" onclick="copyInlineText(event, '${cardEsc}', 'Tarjeta')" title="Copiar Tarjeta">💳 ${cardEsc}</span>` : '<span style="color:var(--text-dim);">-</span>'}
+              </td>
               <td style="font-family: var(--font-mono);">
                 <span class="copyable-text curp-text" onclick="copyInlineText(event, '${curpEsc}', 'CURP')" title="Copiar CURP">${curpEsc}</span>
                 <a href="${santanderLink}" target="_blank" rel="noopener noreferrer" class="hit-link-santander" onclick="return openHitOnboarding(event, ${h.id}, '${santanderLink}');" title="Reclamar y abrir Onboarding Santander (pestaña normal) con este CURP">🔗 Onboarding</a>
@@ -4931,6 +4938,9 @@ function exportCsv() {
               </td>
               <td>${escapeHtml(h.estado || '')}</td>
               <td>${escapeHtml(h.ciudad || '')}</td>
+              <td style="font-family: var(--font-mono); font-size: 11px; text-align: center; color: #a5b4fc;">
+                ${cpEsc ? `<span class="copyable-text" onclick="copyInlineText(event, '${cpEsc}', 'Código Postal')" title="Copiar CP">${cpEsc}</span>` : '<span style="color:var(--text-dim);">-</span>'}
+              </td>
               <td style="font-size: 11px; color: var(--text-muted);" title="${escapeHtml(h.direccion || '')}">${escapeHtml(h.direccion || '')}</td>
               <td style="font-size: 11px; color: #fbbf24;">${escapeHtml(h.operador || '-')}</td>
               <td>
@@ -4946,7 +4956,7 @@ function exportCsv() {
         tbody.innerHTML = html;
       } catch(e) {
         console.error(e);
-        tbody.innerHTML = '<tr><td colspan="12" style="text-align:center; padding: 30px; color: #ef4444;">Error cargando registros de hits.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="14" style="text-align:center; padding: 30px; color: #ef4444;">Error cargando registros de hits.</td></tr>';
       }
     }
 
