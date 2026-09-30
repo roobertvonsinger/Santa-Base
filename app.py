@@ -194,8 +194,33 @@ def get_db_connection():
             results TEXT, u6acct TEXT, u6cvereg TEXT, u6numcto TEXT, dmssnum TEXT,
             dmaddr1 TEXT, dmaddr2 TEXT, u6delomu TEXT, u6estado TEXT, dmcity TEXT,
             dmzip TEXT, u6ladte1 TEXT, u6tel1 TEXT, u6ladte2 TEXT, u6tel2 TEXT, u6licrea TEXT
-        )
+        );
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS santander_hits (
+            id INTEGER PRIMARY KEY,
+            u6acct TEXT,
+            curp TEXT NOT NULL UNIQUE,
+            u6rfc TEXT,
+            dmname TEXT,
+            estado TEXT,
+            ciudad TEXT,
+            codigo_postal TEXT,
+            u6licrea TEXT,
+            fecha_nacimiento TEXT,
+            genero TEXT,
+            telefono TEXT,
+            direccion TEXT,
+            work_status TEXT DEFAULT 'NUEVO',
+            operador TEXT,
+            notas TEXT,
+            checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_hits_status ON santander_hits(work_status);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_hits_edo ON santander_hits(estado);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_hits_checked ON santander_hits(checked_at);")
     return conn
 
 def get_total_records_count(conn):
@@ -216,6 +241,11 @@ class UpdateRecordPayload(BaseModel):
     field: Optional[str] = None
     value: Optional[str] = None
     updates: Optional[dict[str, Any]] = None
+
+class UpdateHitPayload(BaseModel):
+    work_status: Optional[str] = None
+    operador: Optional[str] = None
+    notas: Optional[str] = None
 
 class BulkCurpPayload(BaseModel):
     text: str
@@ -348,6 +378,14 @@ def get_stats(_: None = Depends(require_auth)):
         curp_existente = with_curp - curp_calculada if with_curp >= curp_calculada else 0
         cur.execute("SELECT COUNT(*) FROM santander_records WHERE results IS NOT NULL AND TRIM(results) != ''")
         with_results = cur.fetchone()[0]
+        try:
+            cur.execute("SELECT COUNT(*) FROM santander_hits")
+            hits_total = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM santander_hits WHERE work_status = 'NUEVO'")
+            hits_nuevos = cur.fetchone()[0]
+        except Exception:
+            hits_total = 0
+            hits_nuevos = 0
         return {
             "total": total,
             "with_curp": with_curp,
@@ -355,7 +393,9 @@ def get_stats(_: None = Depends(require_auth)):
             "curp_existente": curp_existente,
             "curp_no_calculable": curp_no_calculable,
             "with_results": with_results,
-            "without_curp": total - with_curp
+            "without_curp": total - with_curp,
+            "hits_total": hits_total,
+            "hits_nuevos": hits_nuevos
         }
     finally:
         conn.close()
@@ -381,7 +421,6 @@ def get_records(
         # Year < 1962 means RFC YY (chars 5-6) is between '27' and '61'.
         where_clauses.append("(SUBSTR(u6rfc, 5, 2) NOT BETWEEN '27' AND '61' OR LENGTH(u6rfc) < 6)")
 
-
         if filter == "no_curp":
             where_clauses.append("(curp IS NULL OR TRIM(curp) = '')")
         elif filter == "has_curp":
@@ -394,6 +433,13 @@ def get_records(
             where_clauses.append("(results IS NULL OR TRIM(results) = '')")
         elif filter == "has_results":
             where_clauses.append("(results IS NOT NULL AND TRIM(results) != '')")
+        elif filter == "hits":
+            where_clauses.append("results = 'HIT'")
+
+        # Por directiva de depuración y separación estricta:
+        # Los registros que ya son HIT están destilados en la Bóveda de HITS; no se mezclan en el explorador general
+        if filter != "hits":
+            where_clauses.append("(results != 'HIT' OR results IS NULL)")
 
         if search and search.strip():
             s = f"%{search.strip().upper()}%"
@@ -550,7 +596,191 @@ def update_record(record_id: int, payload: UpdateRecordPayload, _: None = Depend
         row_dict = dict(row) if row else None
         if row_dict:
             row_dict["direccion"] = format_combined_address(row_dict)
+            if row_dict.get("results") == "HIT" and row_dict.get("curp"):
+                try:
+                    cur.execute("""
+                        INSERT OR IGNORE INTO santander_hits
+                        (id, u6acct, curp, u6rfc, dmname, estado, ciudad, codigo_postal, u6licrea, fecha_nacimiento, genero, telefono, direccion, work_status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NUEVO')
+                    """, (
+                        row_dict.get("id"),
+                        row_dict.get("u6acct"),
+                        row_dict.get("curp"),
+                        row_dict.get("u6rfc"),
+                        row_dict.get("dmname"),
+                        row_dict.get("estado"),
+                        row_dict.get("ciudad"),
+                        row_dict.get("codigo_postal"),
+                        row_dict.get("u6licrea"),
+                        row_dict.get("fecha_nacimiento"),
+                        row_dict.get("genero"),
+                        row_dict.get("u6tel1") or row_dict.get("u6tel2"),
+                        row_dict.get("direccion"),
+                    ))
+                    conn.commit()
+                except Exception as hit_err:
+                    print(f"[WARN] Error insertando en santander_hits: {hit_err}")
+
         return {"ok": True, "updated_id": record_id, "record": row_dict}
+    finally:
+        conn.close()
+
+# ── Endpoints Dedicados de la Bóveda de HITS ─────────────────────────────────
+
+@app.get("/api/hits")
+def get_hits(
+    page: int = Query(1, ge=1),
+    limit: int = Query(100, ge=10, le=500),
+    work_status: Optional[str] = Query(None),
+    search: Optional[str] = None,
+    sort_by: str = Query("checked_at"),
+    sort_dir: str = Query("desc"),
+    _: None = Depends(require_auth)
+):
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        where_clauses = []
+        params = []
+
+        if work_status and work_status.strip().upper() not in ("ALL", ""):
+            where_clauses.append("work_status = ?")
+            params.append(work_status.strip().upper())
+
+        if search and search.strip():
+            s = f"%{search.strip().upper()}%"
+            where_clauses.append("(UPPER(curp) LIKE ? OR UPPER(u6rfc) LIKE ? OR UPPER(dmname) LIKE ? OR UPPER(estado) LIKE ? OR UPPER(ciudad) LIKE ? OR telefono LIKE ? OR u6acct LIKE ?)")
+            params.extend([s, s, s, s, s, s, s])
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        # Contadores globales por estado
+        cur.execute("SELECT work_status, COUNT(*) FROM santander_hits GROUP BY work_status")
+        status_counts = dict(cur.fetchall())
+        total_hits = sum(status_counts.values())
+
+        # Total con filtros aplicados
+        cur.execute(f"SELECT COUNT(*) FROM santander_hits{where_sql}", params)
+        total_filtered = cur.fetchone()[0]
+
+        allowed_sorts = {
+            "id": "id",
+            "checked_at": "checked_at",
+            "u6licrea": "CAST(REPLACE(REPLACE(COALESCE(u6licrea, '0'), '$', ''), ',', '') AS INTEGER)",
+            "curp": "curp",
+            "dmname": "dmname",
+            "estado": "estado",
+            "work_status": "work_status"
+        }
+        order_col = allowed_sorts.get(sort_by, "checked_at")
+        order_dir = "DESC" if str(sort_dir).lower() == "desc" else "ASC"
+
+        offset = (page - 1) * limit
+        query_sql = f"""
+            SELECT id, u6acct, curp, u6rfc, dmname, estado, ciudad, codigo_postal,
+                   u6licrea, fecha_nacimiento, genero, telefono, direccion,
+                   work_status, operador, notas, checked_at, updated_at
+            FROM santander_hits
+            {where_sql}
+            ORDER BY {order_col} {order_dir}
+            LIMIT ? OFFSET ?
+        """
+        cur.execute(query_sql, params + [limit, offset])
+        rows = [dict(r) for r in cur.fetchall()]
+
+        return {
+            "total": total_filtered,
+            "page": page,
+            "limit": limit,
+            "total_pages": (total_filtered + limit - 1) // limit if total_filtered > 0 else 1,
+            "hits": rows,
+            "stats": {
+                "total": total_hits,
+                "nuevo": status_counts.get("NUEVO", 0),
+                "en_gestion": status_counts.get("EN_GESTION", 0),
+                "cerrado": status_counts.get("CERRADO", 0),
+                "descartado": status_counts.get("DESCARTADO", 0),
+            }
+        }
+    finally:
+        conn.close()
+
+@app.patch("/api/hits/{hit_id}")
+@app.put("/api/hits/{hit_id}")
+def update_hit_endpoint(hit_id: int, payload: UpdateHitPayload, user: dict = Depends(require_auth)):
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        updates = ["updated_at = CURRENT_TIMESTAMP"]
+        params = []
+        if payload.work_status is not None:
+            st = payload.work_status.strip().upper()
+            if st not in ("NUEVO", "EN_GESTION", "CERRADO", "DESCARTADO"):
+                raise HTTPException(status_code=400, detail="Estatus no válido. Permitidos: NUEVO, EN_GESTION, CERRADO, DESCARTADO")
+            updates.append("work_status = ?")
+            params.append(st)
+
+        if payload.operador is not None:
+            updates.append("operador = ?")
+            params.append(payload.operador.strip())
+        elif user and "display" in user and payload.work_status is not None:
+            updates.append("operador = COALESCE(operador, ?)")
+            params.append(user["display"])
+
+        if payload.notas is not None:
+            updates.append("notas = ?")
+            params.append(payload.notas.strip())
+
+        params.append(hit_id)
+        cur.execute(f"UPDATE santander_hits SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+
+        cur.execute("SELECT * FROM santander_hits WHERE id = ?", (hit_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Hit no encontrado")
+        return {"ok": True, "hit": dict(row)}
+    finally:
+        conn.close()
+
+@app.get("/api/hits/export")
+def export_hits_csv(work_status: Optional[str] = None, _: None = Depends(require_auth)):
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        where_sql = ""
+        params = []
+        if work_status and work_status.strip().upper() not in ("ALL", ""):
+            where_sql = " WHERE work_status = ?"
+            params.append(work_status.strip().upper())
+
+        cur.execute(f"""
+            SELECT id, curp, u6rfc, dmname, u6licrea, telefono, estado, ciudad,
+                   codigo_postal, direccion, work_status, operador, notas, checked_at
+            FROM santander_hits
+            {where_sql}
+            ORDER BY checked_at DESC
+        """, params)
+        rows = [dict(r) for r in cur.fetchall()]
+
+        headers = [
+            "id", "curp", "u6rfc", "dmname", "u6licrea", "telefono", "estado", "ciudad",
+            "codigo_postal", "direccion", "work_status", "operador", "notas", "checked_at"
+        ]
+        csv_lines = [",".join(headers)]
+        for r in rows:
+            line = []
+            for h in headers:
+                val = str(r.get(h) or "").replace('"', '""')
+                line.append(f'"{val}"')
+            csv_lines.append(",".join(line))
+
+        csv_data = "\ufeff" + "\n".join(csv_lines)
+        return RawResponse(
+            content=csv_data,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="santander_hits.csv"'}
+        )
     finally:
         conn.close()
 
@@ -2295,6 +2525,122 @@ HTML_CONTENT = """<!DOCTYPE html>
       border-left: 3px solid #ec0000 !important;
       color: #f3f4f6 !important;
     }
+
+    /* ── Bóveda de HITS VIP & Selector Maestro ── */
+    .mode-nav-bar {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .nav-tab {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 7px 16px;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      font-size: 12.5px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: var(--transition-fast);
+      letter-spacing: 0.02em;
+    }
+    .nav-tab:hover {
+      background: var(--bg-surface-elevated);
+      color: #fff;
+      border-color: var(--border-strong);
+    }
+    .nav-tab.active {
+      background: #181824;
+      color: #fff;
+      border-color: var(--color-primary);
+      box-shadow: 0 0 10px rgba(236, 0, 0, 0.25);
+    }
+    .nav-tab-hits {
+      border-color: rgba(16, 185, 129, 0.4);
+      color: #34d399;
+    }
+    .nav-tab-hits.active {
+      border-color: #10b981;
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      box-shadow: 0 0 14px rgba(16, 185, 129, 0.35);
+    }
+    .nav-badge {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 800;
+      padding: 1px 7px;
+      border-radius: var(--radius-full);
+      background: rgba(16, 185, 129, 0.25);
+      border: 1px solid rgba(16, 185, 129, 0.5);
+      color: #34d399;
+    }
+    .hit-kpi {
+      border-color: rgba(16, 185, 129, 0.45) !important;
+      background: rgba(16, 185, 129, 0.08) !important;
+      transition: all 180ms ease;
+    }
+    .hit-kpi:hover {
+      background: rgba(16, 185, 129, 0.18) !important;
+      border-color: #10b981 !important;
+      transform: translateY(-1px);
+    }
+    .hit-status-select {
+      background: #14141e;
+      border: 1px solid var(--border-strong);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 6px;
+      border-radius: var(--radius-sm);
+      outline: none;
+      cursor: pointer;
+      width: 100%;
+    }
+    .hit-status-select.status-NUEVO { border-color: #10b981; color: #34d399; background: rgba(16,185,129,0.12); }
+    .hit-status-select.status-EN_GESTION { border-color: #f59e0b; color: #fbbf24; background: rgba(245,158,11,0.12); }
+    .hit-status-select.status-CERRADO { border-color: #3b82f6; color: #93c5fd; background: rgba(59,130,246,0.12); }
+    .hit-status-select.status-DESCARTADO { border-color: #6b7280; color: #9ca3af; background: rgba(107,114,128,0.12); }
+
+    .hit-link-santander {
+      background: #064e3b;
+      border: 1px solid #059669;
+      color: #34d399;
+      font-size: 10px;
+      padding: 2px 5px;
+      border-radius: 3px;
+      text-decoration: none;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      margin-left: 4px;
+    }
+    .hit-link-santander:hover {
+      background: #059669;
+      color: #fff;
+    }
+    .hit-notes-input {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text);
+      font-size: 11.5px;
+      padding: 2px 4px;
+      width: 100%;
+      border-radius: var(--radius-sm);
+    }
+    .hit-notes-input:focus {
+      background: #14141e;
+      border-color: var(--color-primary);
+      outline: none;
+      color: #fff;
+    }
   </style>
 </head>
 <body>
@@ -2362,106 +2708,209 @@ HTML_CONTENT = """<!DOCTYPE html>
         <span class="kpi-label">Resultados</span>
         <span class="kpi-val" id="stat-results">...</span>
       </div>
+      <div class="kpi-card hit-kpi" onclick="switchViewMode('hits')" style="cursor: pointer;" title="Abrir Bóveda Exclusiva de HITS">
+        <span class="kpi-label" style="color: #34d399; font-weight: 700;">🟢 Bóveda HITS</span>
+        <span class="kpi-val" id="stat-hits" style="color: #34d399;">...</span>
+      </div>
       <div class="user-pill role-superadmin" id="current-user-badge" title="Sesión activa">👑 RobertVS</div>
       <button class="btn-logout" onclick="doLogout()" title="Cerrar sesión">Salir</button>
     </div>
   </div>
 
-  <!-- Mega-Buscador (Command Center de 4.9M Registros) -->
-  <div class="mega-search-bar search-input-wrap" id="mega-search-bar">
-    <div class="mega-search-icon">🔍</div>
-    <div class="mega-filter-badge" id="mega-filter-badge" onclick="cyclePresetFilter()" title="Ámbito de búsqueda activo. Clic para alternar.">
-      <span id="mega-filter-badge-text">TODOS</span>
+  <!-- Selector Maestro de Vista (Explorador 4.9M vs Bóveda HITS) -->
+  <div class="mode-nav-bar">
+    <div style="display: flex; gap: 8px; align-items: center;">
+      <button id="nav-btn-general" class="nav-tab active" onclick="switchViewMode('general')">
+        📊 Explorador General (4.9M)
+      </button>
+      <button id="nav-btn-hits" class="nav-tab nav-tab-hits" onclick="switchViewMode('hits')">
+        🟢 BÓVEDA HITS VIP <span class="nav-badge" id="nav-hits-badge">0</span>
+      </button>
     </div>
-    <input type="text" id="global-search" class="mega-search-input" 
-           placeholder="Buscar en 4.9M de registros (RFC, Nombre, CURP, Ciudad, Tarjeta, CP...) — Atajo: (Ctrl+K) o /" 
-           onkeydown="if(event.key==='Enter') applyGlobalSearch(); else if(event.key==='Escape') clearGlobalSearch();" 
-           oninput="toggleSearchClearBtn()">
-    <button id="btn-clear-search" class="mega-search-clear-btn" onclick="clearGlobalSearch()" title="Limpiar búsqueda (Esc)" style="display:none;">✕</button>
-    <button class="btn btn-primary mega-search-submit-btn" onclick="applyGlobalSearch()" title="Ejecutar búsqueda">
-      <span>Buscar</span>
-      <span class="search-btn-badge">↵</span>
-    </button>
+    <div id="hits-quick-actions" style="display: none; gap: 8px; align-items: center;">
+      <button class="btn btn-outline" onclick="copyHitsCurps()" title="Copiar todas las CURPs de esta vista de hits">📋 Copiar CURPs HITS</button>
+      <button class="btn btn-outline" onclick="copyHitsPhones()" title="Copiar teléfonos para marcado rápido">📞 Copiar Teléfonos</button>
+      <button class="btn btn-excel" onclick="exportHitsCsv()" title="Descargar CSV con todos los HITS">⬇️ Exportar HITS (CSV)</button>
+    </div>
   </div>
 
-  <!-- Toolbar con 4 Clusters Visuales y Segmented Control -->
-  <div class="toolbar">
-    <!-- 1. Filtros Predefinidos (Segmented Control) -->
-    <div class="tb-group">
-      <div class="filter-tabs">
-        <button class="tab-btn active" onclick="setPresetFilter('all')">Todos</button>
-        <button class="tab-btn" onclick="setPresetFilter('no_curp')">Falta CURP</button>
-        <button class="tab-btn" onclick="setPresetFilter('has_curp')">Con CURP</button>
-        <button class="tab-btn" onclick="setPresetFilter('calculada')">Calculadas</button>
-        <button class="tab-btn" onclick="setPresetFilter('no_calculable')">No Calculables</button>
-        <button class="tab-btn" onclick="setPresetFilter('has_results')">Con Result</button>
+  <!-- Contenedor Explorador General -->
+  <div id="general-view-container">
+    <!-- Mega-Buscador (Command Center de 4.9M Registros) -->
+    <div class="mega-search-bar search-input-wrap" id="mega-search-bar">
+      <div class="mega-search-icon">🔍</div>
+      <div class="mega-filter-badge" id="mega-filter-badge" onclick="cyclePresetFilter()" title="Ámbito de búsqueda activo. Clic para alternar.">
+        <span id="mega-filter-badge-text">TODOS</span>
+      </div>
+      <input type="text" id="global-search" class="mega-search-input" 
+             placeholder="Buscar en 4.9M de registros (RFC, Nombre, CURP, Ciudad, Tarjeta, CP...) — Atajo: (Ctrl+K) o /" 
+             onkeydown="if(event.key==='Enter') applyGlobalSearch(); else if(event.key==='Escape') clearGlobalSearch();" 
+             oninput="toggleSearchClearBtn()">
+      <button id="btn-clear-search" class="mega-search-clear-btn" onclick="clearGlobalSearch()" title="Limpiar búsqueda (Esc)" style="display:none;">✕</button>
+      <button class="btn btn-primary mega-search-submit-btn" onclick="applyGlobalSearch()" title="Ejecutar búsqueda">
+        <span>Buscar</span>
+        <span class="search-btn-badge">↵</span>
+      </button>
+    </div>
+
+    <!-- Toolbar con 4 Clusters Visuales y Segmented Control -->
+    <div class="toolbar">
+      <!-- 1. Filtros Predefinidos (Segmented Control) -->
+      <div class="tb-group">
+        <div class="filter-tabs">
+          <button class="tab-btn active" onclick="setPresetFilter('all')">Todos</button>
+          <button class="tab-btn" onclick="setPresetFilter('no_curp')">Falta CURP</button>
+          <button class="tab-btn" onclick="setPresetFilter('has_curp')">Con CURP</button>
+          <button class="tab-btn" onclick="setPresetFilter('calculada')">Calculadas</button>
+          <button class="tab-btn" onclick="setPresetFilter('no_calculable')">No Calculables</button>
+          <button class="tab-btn" onclick="setPresetFilter('has_results')">Con Result</button>
+        </div>
       </div>
 
+      <div class="tb-sep"></div>
+
+      <!-- 2. Selección / Copia RFCs & CURPs -->
+      <div class="tb-group">
+        <button class="btn" onclick="copySelectedRfcs()" title="Copiar RFCs de filas seleccionadas">📋 Copiar RFCs (<span id="sel-count">0</span>)</button>
+        <button class="btn btn-curp" onclick="copySelectedCurps()" title="Copiar CURPs de filas seleccionadas">📋 Copiar CURPs (<span id="sel-curp-count">0</span>)</button>
+        <button class="btn btn-outline" onclick="copyPageRfcs()" title="Copiar todos los RFCs de la página">📄 RFCs Pág</button>
+        <button class="btn btn-outline" onclick="copyPageCurps()" title="Copiar todas las CURPs de la página">📄 CURPs Pág</button>
+        <button class="btn btn-danger-outline" id="btn-clear-selection" onclick="clearSelection()" title="Limpiar selección" style="display:none; padding: 4px 8px;">✕</button>
+        <button class="btn btn-primary" id="btn-copy-range" onclick="copyCellRangeSelection()" title="Copiar celdas seleccionadas" style="display:none;">🎯 Copiar Selección (<span id="range-sel-count">0</span>)</button>
+        <button class="btn btn-danger-outline" id="btn-clear-range" onclick="clearCellRangeSelection()" title="Limpiar selección de celdas" style="display:none; padding: 4px 8px;">✕</button>
+      </div>
+
+      <div class="tb-sep"></div>
+
+      <!-- 3. Acciones CURP Masivas -->
+      <div class="tb-group">
+        <button class="btn btn-outline" onclick="openBulkCurpModal()">📥 Pegar CURPs (/cep)</button>
+      </div>
+
+      <div class="tb-sep"></div>
+
+      <!-- 4. Exportar & Reset -->
+      <div class="tb-group">
+        <button class="btn btn-excel" onclick="exportCsv()">⬇️ Exportar CSV</button>
+        <button class="btn btn-danger-outline" id="btn-clear-all-filters" onclick="clearAllFilters()" style="display:none;">✖ Limpiar Filtros</button>
+      </div>
     </div>
 
-    <div class="tb-sep"></div>
-
-    <!-- 2. Selección / Copia RFCs & CURPs -->
-    <div class="tb-group">
-      <button class="btn" onclick="copySelectedRfcs()" title="Copiar RFCs de filas seleccionadas">📋 Copiar RFCs (<span id="sel-count">0</span>)</button>
-      <button class="btn btn-curp" onclick="copySelectedCurps()" title="Copiar CURPs de filas seleccionadas">📋 Copiar CURPs (<span id="sel-curp-count">0</span>)</button>
-      <button class="btn btn-outline" onclick="copyPageRfcs()" title="Copiar todos los RFCs de la página">📄 RFCs Pág</button>
-      <button class="btn btn-outline" onclick="copyPageCurps()" title="Copiar todas las CURPs de la página">📄 CURPs Pág</button>
-      <button class="btn btn-danger-outline" id="btn-clear-selection" onclick="clearSelection()" title="Limpiar selección" style="display:none; padding: 4px 8px;">✕</button>
-      <button class="btn btn-primary" id="btn-copy-range" onclick="copyCellRangeSelection()" title="Copiar celdas seleccionadas" style="display:none;">🎯 Copiar Selección (<span id="range-sel-count">0</span>)</button>
-      <button class="btn btn-danger-outline" id="btn-clear-range" onclick="clearCellRangeSelection()" title="Limpiar selección de celdas" style="display:none; padding: 4px 8px;">✕</button>
+    <!-- Active Filters Indicator Bar -->
+    <div id="active-filters-bar">
+      <span style="font-weight:700; color:#38bdf8;">Filtros activos:</span>
+      <div id="active-filters-chips" style="display:flex; gap:5px; flex-wrap:wrap;"></div>
     </div>
 
-    <div class="tb-sep"></div>
-
-    <!-- 3. Acciones CURP Masivas -->
-    <div class="tb-group">
-      <button class="btn btn-outline" onclick="openBulkCurpModal()">📥 Pegar CURPs (/cep)</button>
+    <!-- Grid Table Container -->
+    <div class="grid-container" id="grid-container">
+      <table class="excel-table" id="excel-table">
+        <thead>
+          <tr id="header-row"></tr>
+        </thead>
+        <tbody id="table-body">
+          <tr><td colspan="22" style="text-align:center; padding: 40px; color: var(--text-muted);">Cargando registros de Santander...</td></tr>
+        </tbody>
+      </table>
     </div>
 
-    <div class="tb-sep"></div>
-
-    <!-- 4. Exportar & Reset -->
-    <div class="tb-group">
-      <button class="btn btn-excel" onclick="exportCsv()">⬇️ Exportar CSV</button>
-      <button class="btn btn-danger-outline" id="btn-clear-all-filters" onclick="clearAllFilters()" style="display:none;">✖ Limpiar Filtros</button>
+    <!-- Pagination Bar -->
+    <div class="pagination-bar">
+      <div id="page-info">Mostrando 0 de 0 registros</div>
+      <div class="page-controls">
+        <label>Por pág: 
+          <select id="limit-select" onchange="changeLimit()" style="background:#090d16; border:1px solid var(--border); color:#fff; padding:2px 5px; border-radius:4px; font-size:10.5px;">
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+            <option value="200" selected>200</option>
+            <option value="500">500</option>
+          </select>
+        </label>
+        <button class="btn btn-outline" id="btn-prev" onclick="prevPage()">◀ Anterior</button>
+        <span id="page-num" style="font-weight: 700; font-family:var(--font-mono); padding: 0 4px;">1 / 1</span>
+        <button class="btn btn-outline" id="btn-next" onclick="nextPage()">Siguiente ▶</button>
+      </div>
     </div>
   </div>
 
-  <!-- Active Filters Indicator Bar -->
-  <div id="active-filters-bar">
-    <span style="font-weight:700; color:#38bdf8;">Filtros activos:</span>
-    <div id="active-filters-chips" style="display:flex; gap:5px; flex-wrap:wrap;"></div>
-  </div>
+  <!-- Vista Dedicada Bóveda de HITS VIP -->
+  <div id="hits-view-container" style="display:none; flex-direction: column; flex: 1; min-height: 0;">
+    <div class="toolbar hits-toolbar">
+      <div class="tb-group">
+        <div class="filter-tabs">
+          <button id="hits-tab-all" class="tab-btn active" onclick="setHitsStatusFilter('all')">Todos (<span id="hits-count-all">0</span>)</button>
+          <button id="hits-tab-nuevo" class="tab-btn" onclick="setHitsStatusFilter('NUEVO')" style="color: #34d399;">🟢 Nuevos (<span id="hits-count-nuevo">0</span>)</button>
+          <button id="hits-tab-gestion" class="tab-btn" onclick="setHitsStatusFilter('EN_GESTION')" style="color: #fbbf24;">🟡 En Gestión (<span id="hits-count-gestion">0</span>)</button>
+          <button id="hits-tab-cerrado" class="tab-btn" onclick="setHitsStatusFilter('CERRADO')" style="color: #60a5fa;">🔵 Cerrados (<span id="hits-count-cerrado">0</span>)</button>
+          <button id="hits-tab-descartado" class="tab-btn" onclick="setHitsStatusFilter('DESCARTADO')" style="color: #9ca3af;">⚪ Descartados (<span id="hits-count-descartado">0</span>)</button>
+        </div>
+      </div>
 
-  <!-- Grid Table Container -->
-  <div class="grid-container" id="grid-container">
-    <table class="excel-table" id="excel-table">
-      <thead>
-        <tr id="header-row"></tr>
-      </thead>
-      <tbody id="table-body">
-        <tr><td colspan="22" style="text-align:center; padding: 40px; color: var(--text-muted);">Cargando registros de Santander...</td></tr>
-      </tbody>
-    </table>
-  </div>
+      <div class="tb-sep"></div>
 
-  <!-- Pagination Bar -->
-  <div class="pagination-bar">
-    <div id="page-info">Mostrando 0 de 0 registros</div>
-    <div class="page-controls">
-      <label>Por pág: 
-        <select id="limit-select" onchange="changeLimit()" style="background:#090d16; border:1px solid var(--border); color:#fff; padding:2px 5px; border-radius:4px; font-size:10.5px;">
-          <option value="25">25</option>
-          <option value="50">50</option>
-          <option value="100">100</option>
-          <option value="200" selected>200</option>
-          <option value="500">500</option>
-        </select>
-      </label>
-      <button class="btn btn-outline" id="btn-prev" onclick="prevPage()">◀ Anterior</button>
-      <span id="page-num" style="font-weight: 700; font-family:var(--font-mono); padding: 0 4px;">1 / 1</span>
-      <button class="btn btn-outline" id="btn-next" onclick="nextPage()">Siguiente ▶</button>
+      <div class="tb-group" style="flex: 1; max-width: 380px;">
+        <input type="text" id="hits-search-input" class="global-search" style="width: 100%;"
+               placeholder="Buscar en HITS (CURP, Nombre, Estado, Teléfono...)"
+               onkeydown="if(event.key==='Enter') applyHitsSearch();"
+               oninput="if(this.value==='') applyHitsSearch();">
+      </div>
+
+      <div class="tb-sep"></div>
+
+      <div class="tb-group">
+        <label style="font-size: 11px; color: var(--text-muted);">Ordenar:
+          <select id="hits-sort-select" onchange="changeHitsSort()" style="background: var(--bg-app); border: 1px solid var(--border-strong); color: #fff; padding: 4px 8px; border-radius: var(--radius-sm); font-size: 11px;">
+            <option value="checked_at:desc" selected>Más recientes</option>
+            <option value="u6licrea:desc">Mayor Crédito ($)</option>
+            <option value="estado:asc">Estado (A-Z)</option>
+            <option value="work_status:asc">Estatus</option>
+          </select>
+        </label>
+        <button class="btn btn-outline" onclick="fetchHits()" title="Recargar tabla de Hits">↻ Recargar</button>
+      </div>
+    </div>
+
+    <!-- Contenedor Tabla de HITS VIP -->
+    <div class="grid-container" id="hits-grid-container" style="flex: 1; min-height: 0;">
+      <table class="excel-table" id="hits-table">
+        <thead>
+          <tr>
+            <th class="excel-header row-num-header" style="width: 40px; text-align: center;">#</th>
+            <th class="excel-header" style="width: 140px;">GESTIÓN</th>
+            <th class="excel-header" style="width: 200px;">CURP (ONBOARDING)</th>
+            <th class="excel-header" style="width: 220px;">NOMBRE COMPLETO</th>
+            <th class="excel-header" style="width: 125px; text-align: right;">LÍMITE CRÉDITO</th>
+            <th class="excel-header" style="width: 125px;">TELÉFONO</th>
+            <th class="excel-header" style="width: 140px;">ESTADO</th>
+            <th class="excel-header" style="width: 140px;">CIUDAD</th>
+            <th class="excel-header" style="width: 280px;">DIRECCIÓN</th>
+            <th class="excel-header" style="width: 110px;">OPERADOR</th>
+            <th class="excel-header" style="width: 220px;">NOTAS</th>
+            <th class="excel-header" style="width: 130px;">DETECCIÓN</th>
+          </tr>
+        </thead>
+        <tbody id="hits-table-body">
+          <tr><td colspan="12" style="text-align:center; padding: 40px; color: var(--text-muted);">Cargando Bóveda de HITS...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Paginación de HITS -->
+    <div class="pagination-bar" id="hits-pagination-bar">
+      <div id="hits-page-info">Mostrando 0 de 0 hits</div>
+      <div class="page-controls">
+        <label>Por pág: 
+          <select id="hits-limit-select" onchange="changeHitsLimit()" style="background:#090d16; border:1px solid var(--border); color:#fff; padding:2px 5px; border-radius:4px; font-size:10.5px;">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+          </select>
+        </label>
+        <button class="btn btn-outline" id="btn-hits-prev" onclick="prevHitsPage()">◀ Anterior</button>
+        <span id="hits-page-num" style="font-weight: 700; font-family:var(--font-mono); padding: 0 4px;">1 / 1</span>
+        <button class="btn btn-outline" id="btn-hits-next" onclick="nextHitsPage()">Siguiente ▶</button>
+      </div>
     </div>
   </div>
 
@@ -2891,6 +3340,11 @@ function initApp() {
         animateCounter('stat-calc', data.curp_calculada || 0);
         animateCounter('stat-no-curp', data.without_curp);
         animateCounter('stat-results', data.with_results);
+        if (data.hits_total !== undefined) {
+          animateCounter('stat-hits', data.hits_total);
+          const navBadge = document.getElementById('nav-hits-badge');
+          if (navBadge) navBadge.innerText = Number(data.hits_total).toLocaleString();
+        }
       } catch(e) { console.error(e); }
     }
 
@@ -4258,6 +4712,260 @@ function exportCsv() {
         }
       });
       tableBodyElem.addEventListener('dragstart', (e) => e.preventDefault());
+    }
+
+    // =========================================================================
+    // LÓGICA DE CONTROL BÓVEDA DE HITS VIP
+    // =========================================================================
+    let currentViewMode = 'general';
+    let hitsPage = 1;
+    let hitsLimit = 100;
+    let hitsStatusFilter = 'all';
+    let hitsSearch = '';
+    let hitsSortBy = 'checked_at';
+    let hitsSortDir = 'desc';
+    let currentHits = [];
+
+    function switchViewMode(mode) {
+      currentViewMode = mode;
+      const genBtn = document.getElementById('nav-btn-general');
+      const hitsBtn = document.getElementById('nav-btn-hits');
+      const genWrap = document.getElementById('general-view-container');
+      const hitsWrap = document.getElementById('hits-view-container');
+      const hitsActions = document.getElementById('hits-quick-actions');
+
+      if (mode === 'hits') {
+        genBtn.classList.remove('active');
+        hitsBtn.classList.add('active');
+        genWrap.style.display = 'none';
+        hitsWrap.style.display = 'flex';
+        hitsActions.style.display = 'flex';
+        fetchHits();
+      } else {
+        hitsBtn.classList.remove('active');
+        genBtn.classList.add('active');
+        hitsWrap.style.display = 'none';
+        genWrap.style.display = 'block';
+        hitsActions.style.display = 'none';
+        loadRecords();
+      }
+    }
+
+    function setHitsStatusFilter(st) {
+      hitsStatusFilter = st;
+      hitsPage = 1;
+      ['all', 'nuevo', 'gestion', 'cerrado', 'descartado'].forEach(k => {
+        const btn = document.getElementById(`hits-tab-${k}`);
+        if (btn) btn.classList.remove('active');
+      });
+      const activeKey = st === 'all' ? 'all' : (st === 'NUEVO' ? 'nuevo' : (st === 'EN_GESTION' ? 'gestion' : (st === 'CERRADO' ? 'cerrado' : 'descartado')));
+      const activeBtn = document.getElementById(`hits-tab-${activeKey}`);
+      if (activeBtn) activeBtn.classList.add('active');
+      fetchHits();
+    }
+
+    function applyHitsSearch() {
+      const input = document.getElementById('hits-search-input');
+      hitsSearch = input ? input.value.trim() : '';
+      hitsPage = 1;
+      fetchHits();
+    }
+
+    function changeHitsSort() {
+      const sel = document.getElementById('hits-sort-select');
+      if (sel) {
+        const [col, dir] = sel.value.split(':');
+        hitsSortBy = col || 'checked_at';
+        hitsSortDir = dir || 'desc';
+        hitsPage = 1;
+        fetchHits();
+      }
+    }
+
+    function changeHitsLimit() {
+      const sel = document.getElementById('hits-limit-select');
+      if (sel) {
+        hitsLimit = parseInt(sel.value, 10) || 100;
+        hitsPage = 1;
+        fetchHits();
+      }
+    }
+
+    function prevHitsPage() {
+      if (hitsPage > 1) {
+        hitsPage--;
+        fetchHits();
+      }
+    }
+
+    function nextHitsPage() {
+      hitsPage++;
+      fetchHits();
+    }
+
+    async function fetchHits() {
+      const tbody = document.getElementById('hits-table-body');
+      if (!tbody) return;
+      tbody.innerHTML = '<tr><td colspan="12" style="text-align:center; padding: 30px; color: var(--text-muted);"><span class="spin">⏳</span> Cargando Bóveda de HITS...</td></tr>';
+
+      const params = new URLSearchParams({
+        page: hitsPage,
+        limit: hitsLimit,
+        sort_by: hitsSortBy,
+        sort_dir: hitsSortDir
+      });
+      if (hitsStatusFilter && hitsStatusFilter !== 'all') params.append('work_status', hitsStatusFilter);
+      if (hitsSearch) params.append('search', hitsSearch);
+
+      try {
+        const res = await fetch(`${BASE_PATH}/api/hits?${params.toString()}`);
+        if (res.status === 401) { showLockScreen(); return; }
+        const data = await res.json();
+        currentHits = data.hits || [];
+
+        // Actualizar contadores
+        const stats = data.stats || {};
+        if (document.getElementById('hits-count-all')) document.getElementById('hits-count-all').innerText = (stats.total || 0).toLocaleString();
+        if (document.getElementById('hits-count-nuevo')) document.getElementById('hits-count-nuevo').innerText = (stats.nuevo || 0).toLocaleString();
+        if (document.getElementById('hits-count-gestion')) document.getElementById('hits-count-gestion').innerText = (stats.en_gestion || 0).toLocaleString();
+        if (document.getElementById('hits-count-cerrado')) document.getElementById('hits-count-cerrado').innerText = (stats.cerrado || 0).toLocaleString();
+        if (document.getElementById('hits-count-descartado')) document.getElementById('hits-count-descartado').innerText = (stats.descartado || 0).toLocaleString();
+        if (document.getElementById('nav-hits-badge')) document.getElementById('nav-hits-badge').innerText = (stats.total || 0).toLocaleString();
+        if (document.getElementById('stat-hits')) document.getElementById('stat-hits').innerText = (stats.total || 0).toLocaleString();
+
+        document.getElementById('hits-page-num').innerText = `${data.page} / ${data.total_pages}`;
+        document.getElementById('hits-page-info').innerText = `Mostrando ${currentHits.length} de ${data.total.toLocaleString()} hits`;
+        document.getElementById('btn-hits-prev').disabled = data.page <= 1;
+        document.getElementById('btn-hits-next').disabled = data.page >= data.total_pages;
+
+        if (currentHits.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="12" style="text-align:center; padding: 40px; color: var(--text-muted);">No hay registros en la Bóveda de HITS con los filtros actuales.</td></tr>';
+          return;
+        }
+
+        let html = '';
+        currentHits.forEach((h, idx) => {
+          const rowNum = (hitsPage - 1) * hitsLimit + idx + 1;
+          const curpEsc = escapeHtml(h.curp || '');
+          const phoneEsc = escapeHtml(h.telefono || '');
+          const limNum = parseInt(h.u6licrea, 10);
+          const limFormatted = !isNaN(limNum) ? '$' + limNum.toLocaleString('es-MX') : '$' + (h.u6licrea || '0');
+          const curpEncoded = encodeURIComponent(h.curp || '');
+          const santanderLink = `https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?canal=digital&curp=${curpEncoded}`;
+
+          html += `
+            <tr id="hit-row-${h.id}">
+              <td class="row-num-cell" style="text-align: center;">${rowNum}</td>
+              <td style="padding: 4px 6px;">
+                <select class="hit-status-select status-${h.work_status || 'NUEVO'}" onchange="updateHitStatus(${h.id}, this.value, this)">
+                  <option value="NUEVO" ${h.work_status === 'NUEVO' ? 'selected' : ''}>🟢 NUEVO</option>
+                  <option value="EN_GESTION" ${h.work_status === 'EN_GESTION' ? 'selected' : ''}>🟡 EN GESTIÓN</option>
+                  <option value="CERRADO" ${h.work_status === 'CERRADO' ? 'selected' : ''}>🔵 CERRADO</option>
+                  <option value="DESCARTADO" ${h.work_status === 'DESCARTADO' ? 'selected' : ''}>⚪ DESCARTADO</option>
+                </select>
+              </td>
+              <td style="font-family: var(--font-mono);">
+                <span class="copyable-text curp-text" onclick="copyInlineText(event, '${curpEsc}', 'CURP')" title="Copiar CURP">${curpEsc}</span>
+                <a href="${santanderLink}" target="_blank" rel="noopener noreferrer" class="hit-link-santander" title="Abrir Onboarding Santander con este CURP">🔗 Onboarding</a>
+              </td>
+              <td style="font-weight: 600; color: #fff;">${escapeHtml(h.dmname || 'Sin nombre')}</td>
+              <td style="text-align: right; font-family: var(--font-mono); font-weight: 700; color: #34d399;">${limFormatted}</td>
+              <td style="font-family: var(--font-mono);">
+                ${phoneEsc ? `<span class="copyable-text" onclick="copyInlineText(event, '${phoneEsc}', 'Teléfono')" title="Copiar teléfono">📞 ${phoneEsc}</span>` : '<span style="color:var(--text-dim);">-</span>'}
+              </td>
+              <td>${escapeHtml(h.estado || '')}</td>
+              <td>${escapeHtml(h.ciudad || '')}</td>
+              <td style="font-size: 11px; color: var(--text-muted);" title="${escapeHtml(h.direccion || '')}">${escapeHtml(h.direccion || '')}</td>
+              <td style="font-size: 11px; color: #fbbf24;">${escapeHtml(h.operador || '-')}</td>
+              <td>
+                <input type="text" class="hit-notes-input" value="${escapeHtml(h.notas || '')}" 
+                       placeholder="+ Nota..."
+                       onchange="updateHitNotes(${h.id}, this.value)"
+                       title="Presiona Enter o haz clic fuera para guardar">
+              </td>
+              <td style="font-size: 10.5px; font-family: var(--font-mono); color: var(--text-dim);">${escapeHtml(h.checked_at || '')}</td>
+            </tr>
+          `;
+        });
+        tbody.innerHTML = html;
+      } catch(e) {
+        console.error(e);
+        tbody.innerHTML = '<tr><td colspan="12" style="text-align:center; padding: 30px; color: #ef4444;">Error cargando registros de hits.</td></tr>';
+      }
+    }
+
+    async function updateHitStatus(hitId, newStatus, selectElem) {
+      if (selectElem) {
+        selectElem.className = `hit-status-select status-${newStatus}`;
+      }
+      try {
+        const res = await fetch(`${BASE_PATH}/api/hits/${hitId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ work_status: newStatus })
+        });
+        if (res.ok) {
+          showToast(`Estatus actualizado a ${newStatus}`);
+          fetchStats();
+        } else {
+          showToast('Error al actualizar estatus');
+        }
+      } catch(e) {
+        showToast('Error de conexión');
+      }
+    }
+
+    async function updateHitNotes(hitId, notes) {
+      try {
+        const res = await fetch(`${BASE_PATH}/api/hits/${hitId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ notas: notes })
+        });
+        if (res.ok) {
+          showToast('Nota guardada');
+        }
+      } catch(e) {
+        showToast('Error al guardar nota');
+      }
+    }
+
+    function copyHitsCurps() {
+      if (!currentHits || currentHits.length === 0) {
+        showToast('No hay hits en la vista actual');
+        return;
+      }
+      const curps = currentHits.map(h => (h.curp || '').trim()).filter(Boolean);
+      if (curps.length === 0) {
+        showToast('No hay CURPs disponibles');
+        return;
+      }
+      const text = curps.join('\\n');
+      navigator.clipboard.writeText(text).then(() => {
+        showToast(`✓ ${curps.length} CURPs de hits copiadas al portapapeles`);
+      }).catch(() => fallbackCopy(text));
+    }
+
+    function copyHitsPhones() {
+      if (!currentHits || currentHits.length === 0) {
+        showToast('No hay hits en la vista actual');
+        return;
+      }
+      const phones = currentHits.map(h => (h.telefono || '').trim()).filter(Boolean);
+      if (phones.length === 0) {
+        showToast('No hay teléfonos registrados en estos hits');
+        return;
+      }
+      const text = phones.join('\\n');
+      navigator.clipboard.writeText(text).then(() => {
+        showToast(`✓ ${phones.length} teléfonos copiados`);
+      }).catch(() => fallbackCopy(text));
+    }
+
+    function exportHitsCsv() {
+      const params = new URLSearchParams();
+      if (hitsStatusFilter && hitsStatusFilter !== 'all') params.append('work_status', hitsStatusFilter);
+      window.location.href = `${BASE_PATH}/api/hits/export?${params.toString()}`;
     }
   </script>
 </body>

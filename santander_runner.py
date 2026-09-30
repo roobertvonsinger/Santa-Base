@@ -24,29 +24,47 @@ def format_short_reason(detail: str) -> str:
 
 START_URL = "https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?utm_source=google-pmax&utm_medium=multi-channel&utm_campaign=MX_RCB_ACC_DEB_NA_AO_N2-PMAX_CVN_CVN_MLT_GAD_PMX_PMAX_NA_CPA&utm_content=multiple_bonif200"
 
-async def check_single_curp(curp: str) -> dict:
+import secrets
+from typing import Optional, Dict, Any
+
+def get_default_residential_proxy() -> Dict[str, str]:
+    sid = secrets.token_hex(6)
+    return {
+        "server": "http://gate.nodemaven.com:8080",
+        "username": f"luiscael70_gmail_com-country-mx-sid-{sid}-ttl-10m",
+        "password": "gg68gfdvd2"
+    }
+
+async def check_single_curp(curp: str, proxy: Optional[dict] = None) -> dict:
     t0 = time.time()
     browser = None
     ctx = None
     pg = None
+    if proxy is None:
+        proxy = get_default_residential_proxy()
+
+    launch_kwargs: Dict[str, Any] = {
+        "headless": True,
+        "args": [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-web-security",
+            "--disable-site-isolation-trials",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-zygote",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--window-size=430,932"
+        ]
+    }
+    if proxy and proxy.get("server"):
+        launch_kwargs["proxy"] = proxy
+
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-web-security",
-                    "--disable-site-isolation-trials",
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--no-zygote",
-                    "--disable-extensions",
-                    "--disable-background-networking",
-                    "--window-size=430,932"
-                ]
-            )
+            browser = await p.chromium.launch(**launch_kwargs)
             try:
                 ctx = await browser.new_context(
                     user_agent="Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
