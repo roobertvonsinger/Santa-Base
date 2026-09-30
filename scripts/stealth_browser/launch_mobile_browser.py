@@ -807,10 +807,29 @@ def browser_worker(proxy_mgr: ProxyManager, cmd_queue: queue.Queue, stop_event: 
 
 
 def _parse_cli_args() -> dict:
+    """Acepta dos formas de invocacion:
+    1) Flags sueltas: --curp=XXX --estado=JALISCO --operator-estado=Jalisco
+    2) Un solo argumento con el protocolo custom registrado en Windows:
+       santabase-stealth://open?curp=XXX&estado=JALISCO
+       (asi es como Windows invoca el handler cuando se hace clic en el link desde la boveda web)
+    """
     args = {"curp": None, "estado": None, "operator_estado": None}
     for a in sys.argv[1:]:
-        a = a.strip()
-        if a.startswith("--curp="):
+        a = a.strip().strip('"')
+        if a.lower().startswith("santabase-stealth:"):
+            try:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(a)
+                qs = parse_qs(parsed.query)
+                if "curp" in qs and qs["curp"]:
+                    args["curp"] = qs["curp"][0].strip()
+                if "estado" in qs and qs["estado"]:
+                    args["estado"] = qs["estado"][0].strip()
+                if "operator_estado" in qs and qs["operator_estado"]:
+                    args["operator_estado"] = qs["operator_estado"][0].strip()
+            except Exception:
+                pass  # URI mal formado: no truena, simplemente arranca sin pre-llenar nada
+        elif a.startswith("--curp="):
             args["curp"] = a.split("=", 1)[1].strip()
         elif a.startswith("--estado="):
             args["estado"] = a.split("=", 1)[1].strip()

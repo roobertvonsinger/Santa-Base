@@ -4899,6 +4899,8 @@ function exportCsv() {
           const limFormatted = !isNaN(limNum) ? '$' + limNum.toLocaleString('es-MX') : '$' + (h.u6licrea || '0');
           const curpEncoded = encodeURIComponent(h.curp || '');
           const santanderLink = `https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?canal=digital&curp=${curpEncoded}`;
+          const estadoEncoded = encodeURIComponent(h.estado || '');
+          const stealthLink = `santabase-stealth://open?curp=${curpEncoded}&estado=${estadoEncoded}`;
 
           html += `
             <tr id="hit-row-${h.id}">
@@ -4913,7 +4915,8 @@ function exportCsv() {
               </td>
               <td style="font-family: var(--font-mono);">
                 <span class="copyable-text curp-text" onclick="copyInlineText(event, '${curpEsc}', 'CURP')" title="Copiar CURP">${curpEsc}</span>
-                <a href="${santanderLink}" target="_blank" rel="noopener noreferrer" class="hit-link-santander" onclick="return openHitOnboarding(event, ${h.id}, '${santanderLink}');" title="Reclamar y abrir Onboarding Santander con este CURP">🔗 Onboarding</a>
+                <a href="${santanderLink}" target="_blank" rel="noopener noreferrer" class="hit-link-santander" onclick="return openHitOnboarding(event, ${h.id}, '${santanderLink}');" title="Reclamar y abrir Onboarding Santander (pestaña normal) con este CURP">🔗 Onboarding</a>
+                <a href="${stealthLink}" class="hit-link-santander" onclick="return openHitStealthBrowser(event, ${h.id}, '${stealthLink}');" title="Reclamar y abrir en Stealth Browser (requiere registrar el protocolo una vez, ver scripts/stealth_browser/README.md)">🖥️ Stealth</a>
               </td>
               <td style="font-weight: 600; color: #fff;">${escapeHtml(h.dmname || 'Sin nombre')}</td>
               <td style="text-align: right; font-family: var(--font-mono); font-weight: 700; color: #34d399;">${limFormatted}</td>
@@ -4997,6 +5000,30 @@ function exportCsv() {
         // No dejar la pestana en blanco atorada si el claim falla (red caida, etc): abrir igual y avisar.
         showToast('No se pudo registrar quién trabaja este hit (sin conexión); se abrió de todos modos');
         proceed(url);
+      });
+      return false;
+    }
+
+    // Reclama el hit y dispara el protocolo santabase-stealth:// (navegador nativo de operador,
+    // pre-llenado con CURP + estado del hit). Navegar a un protocolo custom NO abandona esta
+    // pagina — el navegador solo le pasa el control al SO. Si el operador todavia no registro el
+    // protocolo (scripts/stealth_browser/register_protocol.ps1), el navegador muestra su propio
+    // aviso nativo sin romper nada aqui; por eso NO hace falta manejar ese caso como error.
+    function openHitStealthBrowser(event, hitId, uri) {
+      event.preventDefault();
+      const launch = () => { window.location.href = uri; };
+      claimHit(hitId).then(result => {
+        const hit = result.hit || {};
+        if (!result.claimed && hit.operador && hit.operador !== (currentUser && currentUser.display)) {
+          const takeOver = confirm(`Este hit ya lo está trabajando ${hit.operador} (estatus ${hit.work_status}).\n¿Abrirlo de todos modos y tomarlo?`);
+          if (!takeOver) { return; }
+          updateHitStatus(hitId, 'EN_GESTION', null);
+        }
+        launch();
+        fetchHits();
+      }).catch(() => {
+        showToast('No se pudo registrar quién trabaja este hit (sin conexión); se abrió de todos modos');
+        launch();
       });
       return false;
     }
