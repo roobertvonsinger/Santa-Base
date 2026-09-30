@@ -114,3 +114,44 @@ def test_hits_export_csv():
     assert res.status_code == 200
     assert "text/csv" in res.headers["content-type"]
     assert "ROVR880101HDFR01" in res.text
+
+def other_operator_cookies():
+    token = generate_session_token("Luisito")
+    return {"santabase_session": token}
+
+def test_claim_hit_assigns_operador_and_status():
+    res = client.post("/api/hits/1/claim", cookies=auth_cookies())
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ok"] is True
+    assert data["claimed"] is True
+    assert data["hit"]["work_status"] == "EN_GESTION"
+    assert data["hit"]["operador"] == "RobertVS"
+
+def test_claim_hit_idempotent_for_same_operator():
+    res1 = client.post("/api/hits/1/claim", cookies=auth_cookies())
+    res2 = client.post("/api/hits/1/claim", cookies=auth_cookies())
+    assert res1.json()["claimed"] is True
+    assert res2.json()["claimed"] is True
+    assert res2.json()["hit"]["operador"] == "RobertVS"
+
+def test_claim_hit_does_not_steal_from_another_operator():
+    # RobertVS lo reclama primero
+    first = client.post("/api/hits/1/claim", cookies=auth_cookies())
+    assert first.json()["claimed"] is True
+    assert first.json()["hit"]["operador"] == "RobertVS"
+
+    # Luisito intenta reclamar el mismo hit -> NO debe pisarlo (evita duplicar chamba)
+    second = client.post("/api/hits/1/claim", cookies=other_operator_cookies())
+    data = second.json()
+    assert data["claimed"] is False
+    assert data["hit"]["operador"] == "RobertVS"
+    assert data["hit"]["work_status"] == "EN_GESTION"
+
+def test_claim_hit_requires_auth():
+    res = client.post("/api/hits/1/claim")
+    assert res.status_code == 401
+
+def test_claim_hit_404_for_missing_id():
+    res = client.post("/api/hits/9999/claim", cookies=auth_cookies())
+    assert res.status_code == 404

@@ -743,6 +743,35 @@ def update_hit_endpoint(hit_id: int, payload: UpdateHitPayload, user: dict = Dep
     finally:
         conn.close()
 
+@app.post("/api/hits/{hit_id}/claim")
+def claim_hit_endpoint(hit_id: int, user: dict = Depends(require_auth)):
+    """Reclama atomicamente un hit para trabajarlo E2E (abrir el Onboarding real de Santander desde
+    la boveda). Solo transiciona NUEVO/sin-operador -> EN_GESTION con el operador actual; si otro
+    operador ya lo tiene, NO lo pisa (evita duplicar chamba entre 2 personas por una condicion de
+    carrera) y el frontend decide si avisar/forzar toma."""
+    display = (user or {}).get("display")
+    if not display:
+        raise HTTPException(status_code=400, detail="Usuario no identificado")
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        # UPDATE condicional atomico: una sola sentencia SQL, sin ventana de carrera entre leer y escribir.
+        cur.execute("""
+            UPDATE santander_hits
+            SET work_status = 'EN_GESTION', operador = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND (work_status = 'NUEVO' OR operador IS NULL OR TRIM(operador) = '' OR operador = ?)
+        """, (display, hit_id, display))
+        conn.commit()
+        cur.execute("SELECT id, curp, work_status, operador FROM santander_hits WHERE id = ?", (hit_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Hit no encontrado")
+        row_dict = dict(row)
+        claimed = (row_dict.get("operador") == display)
+        return {"ok": True, "claimed": claimed, "hit": row_dict}
+    finally:
+        conn.close()
+
 @app.get("/api/hits/export")
 def export_hits_csv(work_status: Optional[str] = None, _: None = Depends(require_auth)):
     conn = get_db_connection()
@@ -4884,7 +4913,7 @@ function exportCsv() {
               </td>
               <td style="font-family: var(--font-mono);">
                 <span class="copyable-text curp-text" onclick="copyInlineText(event, '${curpEsc}', 'CURP')" title="Copiar CURP">${curpEsc}</span>
-                <a href="${santanderLink}" target="_blank" rel="noopener noreferrer" class="hit-link-santander" title="Abrir Onboarding Santander con este CURP">🔗 Onboarding</a>
+                <a href="${santanderLink}" target="_blank" rel="noopener noreferrer" class="hit-link-santander" onclick="return openHitOnboarding(event, ${h.id}, '${santanderLink}');" title="Reclamar y abrir Onboarding Santander con este CURP">🔗 Onboarding</a>
               </td>
               <td style="font-weight: 600; color: #fff;">${escapeHtml(h.dmname || 'Sin nombre')}</td>
               <td style="text-align: right; font-family: var(--font-mono); font-weight: 700; color: #34d399;">${limFormatted}</td>
@@ -4931,6 +4960,45 @@ function exportCsv() {
       } catch(e) {
         showToast('Error de conexión');
       }
+    }
+
+    async function claimHit(hitId) {
+      const res = await fetch(`${BASE_PATH}/api/hits/${hitId}/claim`, { method: 'POST' });
+      if (!res.ok) throw new Error(`claim HTTP ${res.status}`);
+      return await res.json();
+    }
+
+    // Reclama el hit (atomico en servidor) y ABRE el Onboarding real de Santander desde la boveda.
+    // La pestana se abre de inmediato (sincrono, en el mismo gesto de clic) para que el navegador no
+    // la bloquee como popup y para que nunca se sienta "atorado" esperando la red; el resultado del
+    // claim solo decide a donde navega esa pestana ya abierta.
+    function openHitOnboarding(event, hitId, url) {
+      event.preventDefault();
+      const newTab = window.open('about:blank', '_blank');
+      const proceed = (finalUrl) => {
+        if (newTab && !newTab.closed) { newTab.location.href = finalUrl; }
+        else { window.open(finalUrl, '_blank'); }
+      };
+      claimHit(hitId).then(result => {
+        const hit = result.hit || {};
+        if (!result.claimed && hit.operador && hit.operador !== (currentUser && currentUser.display)) {
+          if (newTab && !newTab.closed) newTab.close();
+          const takeOver = confirm(`Este hit ya lo está trabajando ${hit.operador} (estatus ${hit.work_status}).\n¿Abrirlo de todos modos y tomarlo?`);
+          if (!takeOver) { return; }
+          // Reasignacion explicita pedida por el operador actual (no automatica, evita pisar por accidente).
+          updateHitStatus(hitId, 'EN_GESTION', null);
+          window.open(url, '_blank');
+          fetchHits();
+          return;
+        }
+        proceed(url);
+        fetchHits();
+      }).catch(() => {
+        // No dejar la pestana en blanco atorada si el claim falla (red caida, etc): abrir igual y avisar.
+        showToast('No se pudo registrar quién trabaja este hit (sin conexión); se abrió de todos modos');
+        proceed(url);
+      });
+      return false;
     }
 
     async function updateHitNotes(hitId, notes) {
