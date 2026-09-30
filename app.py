@@ -4102,6 +4102,12 @@ function initApp() {
           return;
         }
 
+        // La navegacion de celdas tipo Excel (flechas, tab, ctrl+c/v, etc.) es exclusiva
+        // del Explorador General (#grid-container). En la Boveda HITS este grid esta oculto
+        // y no tiene celda activa, asi que sin este guard el preventDefault() de abajo
+        // bloqueaba el scroll nativo con flechas en la Boveda sin hacer nada util a cambio.
+        if (currentViewMode !== 'general') return;
+
         if (isEditingCell) return;
 
         if (e.key === 'ArrowDown') {
