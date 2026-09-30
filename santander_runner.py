@@ -36,7 +36,7 @@ def get_default_residential_proxy() -> Dict[str, str]:
     }
 
 
-def _check_curp_sync(
+def _execute_attempt(
     curp: str,
     proxy: Optional[Dict[str, str]] = None,
     state: str = "NUEVO LEON",
@@ -161,6 +161,21 @@ def _check_curp_sync(
             timeout=22
         )
         if r4.status_code != 200:
+            pe_code = ""
+            pe_msg = ""
+            try:
+                notif4 = r4.json().get("notifications", [{}])[0]
+                pe_code = notif4.get("code", "")
+                pe_msg = notif4.get("message", "")
+            except Exception:
+                pass
+            if pe_code.startswith("PE") or r4.status_code in (400, 422, 423):
+                return {
+                    "curp": curp,
+                    "status": "OFF",
+                    "detail": f"Rechazo bancario ({pe_code or r4.status_code})",
+                    "time": round(time.time() - t0, 1)
+                }
             return {
                 "curp": curp,
                 "status": "RETRY",
@@ -234,6 +249,25 @@ def _check_curp_sync(
         }
     finally:
         session.close()
+
+
+def _check_curp_sync(
+    curp: str,
+    proxy: Optional[Dict[str, str]] = None,
+    state: str = "NUEVO LEON",
+    lat: str = "25.748",
+    lon: str = "-100.285"
+) -> Dict[str, Any]:
+    for attempt in range(2):
+        p = proxy if (proxy and attempt == 0) else get_default_residential_proxy()
+        res = _execute_attempt(curp, proxy=p, state=state, lat=lat, lon=lon)
+        if res.get("status") in ("ON", "OFF"):
+            return res
+        if attempt == 0 and "Excepción red" in str(res.get("detail", "")):
+            time.sleep(0.5)
+            continue
+        return res
+    return res
 
 
 async def check_single_curp(
