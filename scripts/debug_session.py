@@ -1,7 +1,11 @@
+import sys
 import time
 import random
 import json
 from curl_cffi import requests
+
+curp_test = sys.argv[1] if len(sys.argv) > 1 else "GUPP790601HJCTDD07"
+state_test = sys.argv[2] if len(sys.argv) > 2 else "JALISCO"
 
 sid = random.randint(10000000, 99999999)
 p = f"http://santabase1_custom_zone_MX_ssid_{sid}_time_10:Santabase123@us.proxy001.com:7878"
@@ -19,19 +23,17 @@ proxies = {"http": p, "https": p}
 s = requests.Session(impersonate="chrome120", proxies=proxies)
 
 t0 = time.time()
-print(f"Testing with sid={sid}...")
+print(f"Testing CURP={curp_test} State={state_test} with sid={sid}...")
 try:
-    r1 = s.get("https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/session/init", headers=headers, timeout=15)
+    r1 = s.get("https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/session/init", headers=headers, timeout=10)
     print(f"r1: {r1.status_code} ({time.time()-t0:.2f}s)")
-    print(f"r1 cookies: {dict(s.cookies)}")
-    print(f"r1 body: {r1.text[:150]}")
     
     t1 = time.time()
     r2 = s.post(
         "https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/agreements/accept",
         headers=headers,
         json={"data": {"privacy": True, "termsAndConditions": True, "originFlow": "/cuenta-digital-lite/personal-data"}},
-        timeout=15
+        timeout=10
     )
     print(f"r2: {r2.status_code} ({time.time()-t1:.2f}s)")
     
@@ -39,11 +41,11 @@ try:
     r3 = s.post(
         "https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/curp/consulta",
         headers=headers,
-        json={"data": {"birthCountry": "052", "mainPersonalIdentifier": "GUPP790601HJCTDD07"}},
-        timeout=15
+        json={"data": {"birthCountry": "052", "mainPersonalIdentifier": curp_test}},
+        timeout=12
     )
     print(f"r3: {r3.status_code} ({time.time()-t2:.2f}s)")
-    print(f"r3 body: {r3.text[:150]}")
+    print(f"r3 body: {r3.text[:200]}")
 
     t3 = time.time()
     r4 = s.post(
@@ -51,16 +53,16 @@ try:
         headers=headers,
         json={
             "data": {
-                "state": "JALISCO",
+                "state": state_test,
                 "os": "Android",
                 "deviceVersion": "Android Google Pixel 9 15",
                 "browserSize": "400x850",
                 "resolutionScreen": "800x1700",
-                "latitude": "20.659",
-                "longitude": "-103.349"
+                "latitude": "19.4326",
+                "longitude": "-99.1332"
             }
         },
-        timeout=25
+        timeout=28
     )
     print(f"r4: {r4.status_code} ({time.time()-t3:.2f}s)")
     print(f"r4 body: {r4.text[:200]}")
@@ -69,3 +71,4 @@ except Exception as e:
     print(f"Error after {time.time()-t0:.2f}s: {e}")
 finally:
     s.close()
+
