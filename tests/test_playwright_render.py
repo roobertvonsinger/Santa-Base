@@ -133,6 +133,28 @@ async def test_ui():
         rfc_date_color = await rfc_date.evaluate("el => window.getComputedStyle(el).color")
         print(f"RFC date color: {rfc_date_color}")
 
+        # Verify Explorer View layout and scroll container bounds
+        gen_display = await page.evaluate("() => window.getComputedStyle(document.getElementById('general-view-container')).display")
+        assert gen_display == "flex", f"Expected general-view-container to be flex, got {gen_display}"
+        
+        pag_visible = await page.evaluate('''() => {
+            const pag = document.querySelector('.pagination-bar');
+            if (!pag) return false;
+            const r = pag.getBoundingClientRect();
+            return r.top < window.innerHeight && r.bottom <= window.innerHeight;
+        }''')
+        assert pag_visible is True, "Pagination bar must be visible inside viewport"
+
+        # Verify view switching maintains display: flex
+        await page.click("#nav-btn-hits")
+        await page.wait_for_timeout(200)
+        assert await page.evaluate("() => window.getComputedStyle(document.getElementById('hits-view-container')).display") == "flex"
+        assert await page.evaluate("() => window.getComputedStyle(document.getElementById('general-view-container')).display") == "none"
+
+        await page.click("#nav-btn-general")
+        await page.wait_for_timeout(200)
+        assert await page.evaluate("() => window.getComputedStyle(document.getElementById('general-view-container')).display") == "flex"
+
         # Capture populated dashboard screenshot
         screenshot_path = "tests/dashboard_populated.png"
         await page.screenshot(path=screenshot_path)

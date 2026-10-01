@@ -1798,9 +1798,18 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
     .filter-chip-remove:hover { color: #fff; }
 
+    /* General Explorer View Container */
+    #general-view-container {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+    }
+
     /* Grid Table Container */
     .grid-container {
       flex: 1;
+      min-height: 0;
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: var(--radius-md);
@@ -2782,7 +2791,7 @@ HTML_CONTENT = """<!DOCTYPE html>
   </div>
 
   <!-- Contenedor Explorador General -->
-  <div id="general-view-container">
+  <div id="general-view-container" style="display: flex; flex-direction: column; flex: 1; min-height: 0;">
     <!-- Mega-Buscador (Command Center de 4.9M Registros) -->
     <div class="mega-search-bar search-input-wrap" id="mega-search-bar">
       <div class="mega-search-icon">🔍</div>
@@ -2850,7 +2859,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     </div>
 
     <!-- Grid Table Container -->
-    <div class="grid-container" id="grid-container">
+    <div class="grid-container" id="grid-container" style="flex: 1; min-height: 0;">
       <table class="excel-table" id="excel-table">
         <thead>
           <tr id="header-row"></tr>
@@ -4100,14 +4109,37 @@ function initApp() {
 
     function setupKeyboardListeners() {
       window.addEventListener('keydown', (e) => {
-        if (['login-password', 'search-input', 'global-search', 'popover-filter-val', 'bulk-curp-text'].includes(e.target.id)) {
+        if (['login-password', 'search-input', 'global-search', 'popover-filter-val', 'bulk-curp-text', 'hits-search-input'].includes(e.target.id) || (e.target && e.target.classList && e.target.classList.contains('hit-notes-input'))) {
           return;
         }
 
-        // La navegacion de celdas tipo Excel (flechas, tab, ctrl+c/v, etc.) es exclusiva
-        // del Explorador General (#grid-container). En la Boveda HITS este grid esta oculto
-        // y no tiene celda activa, asi que sin este guard el preventDefault() de abajo
-        // bloqueaba el scroll nativo con flechas en la Boveda sin hacer nada util a cambio.
+        // Navegación con teclado en la Bóveda de HITS
+        if (currentViewMode === 'hits') {
+          const hitsGrid = document.getElementById('hits-grid-container');
+          if (hitsGrid) {
+            if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              hitsGrid.scrollTop += 40;
+            } else if (e.key === 'ArrowUp') {
+              e.preventDefault();
+              hitsGrid.scrollTop -= 40;
+            } else if (e.key === 'PageDown') {
+              e.preventDefault();
+              hitsGrid.scrollTop += hitsGrid.clientHeight * 0.8;
+            } else if (e.key === 'PageUp') {
+              e.preventDefault();
+              hitsGrid.scrollTop -= hitsGrid.clientHeight * 0.8;
+            } else if (e.key === 'Home') {
+              e.preventDefault();
+              hitsGrid.scrollTop = 0;
+            } else if (e.key === 'End') {
+              e.preventDefault();
+              hitsGrid.scrollTop = hitsGrid.scrollHeight;
+            }
+          }
+          return;
+        }
+
         if (currentViewMode !== 'general') return;
 
         if (isEditingCell) return;
@@ -4800,7 +4832,7 @@ function exportCsv() {
         hitsBtn.classList.remove('active');
         genBtn.classList.add('active');
         hitsWrap.style.display = 'none';
-        genWrap.style.display = 'block';
+        genWrap.style.display = 'flex';
         hitsActions.style.display = 'none';
         loadRecords();
       }
