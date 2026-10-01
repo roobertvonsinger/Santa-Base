@@ -649,8 +649,8 @@ def get_hits(
 
         if search and search.strip():
             s = f"%{search.strip().upper()}%"
-            where_clauses.append("(UPPER(curp) LIKE ? OR UPPER(u6rfc) LIKE ? OR UPPER(dmname) LIKE ? OR UPPER(estado) LIKE ? OR UPPER(ciudad) LIKE ? OR telefono LIKE ? OR u6acct LIKE ?)")
-            params.extend([s, s, s, s, s, s, s])
+            where_clauses.append("(UPPER(curp) LIKE ? OR UPPER(u6rfc) LIKE ? OR UPPER(dmname) LIKE ? OR UPPER(estado) LIKE ? OR UPPER(ciudad) LIKE ? OR telefono LIKE ? OR u6acct LIKE ? OR codigo_postal LIKE ?)")
+            params.extend([s, s, s, s, s, s, s, s])
 
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
@@ -670,6 +670,10 @@ def get_hits(
             "curp": "curp",
             "dmname": "dmname",
             "estado": "estado",
+            "ciudad": "ciudad",
+            "codigo_postal": "codigo_postal",
+            "u6acct": "u6acct",
+            "operador": "operador",
             "work_status": "work_status"
         }
         order_col = allowed_sorts.get(sort_by, "checked_at")
@@ -745,30 +749,64 @@ def update_hit_endpoint(hit_id: int, payload: UpdateHitPayload, user: dict = Dep
 
 @app.post("/api/hits/{hit_id}/claim")
 def claim_hit_endpoint(hit_id: int, user: dict = Depends(require_auth)):
-    """Reclama atomicamente un hit para trabajarlo E2E (abrir el Onboarding real de Santander desde
-    la boveda). Solo transiciona NUEVO/sin-operador -> EN_GESTION con el operador actual; si otro
-    operador ya lo tiene, NO lo pisa (evita duplicar chamba entre 2 personas por una condicion de
-    carrera) y el frontend decide si avisar/forzar toma."""
+    """Reclama atómicamente un hit para trabajarlo E2E.
+    Para operadores (no superadmin):
+    - Se limita la concurrencia a exactamente 1 lead activo a la vez.
+    - Si el operador ya tenía un lead previo en 'EN_GESTION', el previo se cierra automáticamente
+      (work_status='CERRADO') con nota de auditoría para no dejar colgados procesos o leads bloqueados.
+    Para superadmin (Robertvs): sin restricciones.
+    """
     display = (user or {}).get("display")
+    role = (user or {}).get("role", "operator")
+    username = (user or {}).get("username", "")
+    is_superadmin = (role == "superadmin" or username == "Robertvs")
+
     if not display:
         raise HTTPException(status_code=400, detail="Usuario no identificado")
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        # UPDATE condicional atomico: una sola sentencia SQL, sin ventana de carrera entre leer y escribir.
+
+        # Para operadores normales: auto-cerrar cualquier lead previo que tuviera en gestión
+        closed_prev_id = None
+        if not is_superadmin:
+            cur.execute("""
+                SELECT id FROM santander_hits
+                WHERE operador = ? AND work_status = 'EN_GESTION' AND id != ?
+            """, (display, hit_id))
+            prev_row = cur.fetchone()
+            if prev_row:
+                closed_prev_id = prev_row[0]
+                cur.execute("""
+                    UPDATE santander_hits
+                    SET work_status = 'CERRADO', updated_at = CURRENT_TIMESTAMP,
+                        notas = CASE 
+                            WHEN notas IS NULL OR TRIM(notas) = '' THEN '[Auto-cerrado al tomar nuevo lead]'
+                            ELSE notas || ' | [Auto-cerrado al tomar nuevo lead]'
+                        END
+                    WHERE operador = ? AND work_status = 'EN_GESTION' AND id != ?
+                """, (display, hit_id))
+
+        # UPDATE condicional atómico para el nuevo lead:
         cur.execute("""
             UPDATE santander_hits
             SET work_status = 'EN_GESTION', operador = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND (work_status = 'NUEVO' OR operador IS NULL OR TRIM(operador) = '' OR operador = ?)
-        """, (display, hit_id, display))
+            WHERE id = ? AND (work_status = 'NUEVO' OR operador IS NULL OR TRIM(operador) = '' OR operador = ? OR ?)
+        """, (display, hit_id, display, is_superadmin))
         conn.commit()
+
         cur.execute("SELECT id, curp, work_status, operador FROM santander_hits WHERE id = ?", (hit_id,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Hit no encontrado")
         row_dict = dict(row)
         claimed = (row_dict.get("operador") == display)
-        return {"ok": True, "claimed": claimed, "hit": row_dict}
+        return {
+            "ok": True,
+            "claimed": claimed,
+            "hit": row_dict,
+            "closed_previous_id": closed_prev_id
+        }
     finally:
         conn.close()
 
@@ -2697,6 +2735,53 @@ HTML_CONTENT = """<!DOCTYPE html>
       outline: none;
       color: #fff;
     }
+    .btn-hit-trabajar {
+      background: linear-gradient(135deg, #059669, #0d9488);
+      border: 1px solid #10b981;
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      transition: all 0.15s ease;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+      white-space: nowrap;
+      text-decoration: none;
+    }
+    .btn-hit-trabajar:hover {
+      background: linear-gradient(135deg, #10b981, #14b8a6);
+      border-color: #34d399;
+      transform: translateY(-1px);
+      box-shadow: 0 3px 8px rgba(16, 185, 129, 0.35);
+    }
+    .btn-hit-trabajar:active {
+      transform: translateY(0);
+    }
+    .excel-header.sortable-th {
+      user-select: none;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    .excel-header.sortable-th:hover {
+      background: #182238 !important;
+      color: #fff;
+    }
+    .excel-header.sortable-th .th-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      width: 100%;
+    }
+    .excel-header.sortable-th .sort-indicator {
+      color: #38bdf8;
+      font-size: 10px;
+      font-weight: 900;
+    }
   </style>
 </head>
 <body>
@@ -2931,25 +3016,46 @@ HTML_CONTENT = """<!DOCTYPE html>
     <div class="grid-container" id="hits-grid-container" style="flex: 1; min-height: 0;">
       <table class="excel-table" id="hits-table">
         <thead>
-          <tr>
+          <tr id="hits-header-row">
             <th class="excel-header row-num-header" style="width: 40px; text-align: center;">#</th>
-            <th class="excel-header" style="width: 140px;">GESTIÓN</th>
-            <th class="excel-header" style="width: 170px;">TARJETA</th>
-            <th class="excel-header" style="width: 200px;">CURP (ONBOARDING)</th>
-            <th class="excel-header" style="width: 220px;">NOMBRE COMPLETO</th>
-            <th class="excel-header" style="width: 125px; text-align: right;">LÍMITE CRÉDITO</th>
+            <th class="excel-header sortable-th" style="width: 135px;" onclick="toggleHitsSort('work_status')" title="Clic para ordenar por Estatus de Gestión">
+              <div class="th-title-wrap">GESTIÓN <span id="th-hits-sort-work_status" class="sort-indicator"></span></div>
+            </th>
+            <th class="excel-header" style="width: 105px; text-align: center;">ACCIÓN</th>
+            <th class="excel-header sortable-th" style="width: 165px;" onclick="toggleHitsSort('u6acct')" title="Clic para ordenar por Tarjeta">
+              <div class="th-title-wrap">TARJETA <span id="th-hits-sort-u6acct" class="sort-indicator"></span></div>
+            </th>
+            <th class="excel-header sortable-th" style="width: 180px;" onclick="toggleHitsSort('curp')" title="Clic para ordenar por CURP">
+              <div class="th-title-wrap">CURP <span id="th-hits-sort-curp" class="sort-indicator"></span></div>
+            </th>
+            <th class="excel-header sortable-th" style="width: 220px;" onclick="toggleHitsSort('dmname')" title="Clic para ordenar por Nombre">
+              <div class="th-title-wrap">NOMBRE COMPLETO <span id="th-hits-sort-dmname" class="sort-indicator"></span></div>
+            </th>
+            <th class="excel-header sortable-th" style="width: 125px; text-align: right;" onclick="toggleHitsSort('u6licrea')" title="Clic para ordenar por Límite de Crédito">
+              <div class="th-title-wrap" style="justify-content: flex-end;">LÍMITE CRÉDITO <span id="th-hits-sort-u6licrea" class="sort-indicator"></span></div>
+            </th>
+            <th class="excel-header sortable-th" style="width: 130px;" onclick="toggleHitsSort('estado')" title="Clic para ordenar por Estado">
+              <div class="th-title-wrap">ESTADO <span id="th-hits-sort-estado" class="sort-indicator"></span></div>
+            </th>
+            <th class="excel-header sortable-th" style="width: 130px;" onclick="toggleHitsSort('ciudad')" title="Clic para ordenar por Ciudad">
+              <div class="th-title-wrap">CIUDAD <span id="th-hits-sort-ciudad" class="sort-indicator"></span></div>
+            </th>
+            <th class="excel-header sortable-th" style="width: 85px; text-align: center;" onclick="toggleHitsSort('codigo_postal')" title="Clic para ordenar por Código Postal">
+              <div class="th-title-wrap" style="justify-content: center;">CP <span id="th-hits-sort-codigo_postal" class="sort-indicator"></span></div>
+            </th>
             <th class="excel-header" style="width: 125px;">TELÉFONO</th>
-            <th class="excel-header" style="width: 130px;">ESTADO</th>
-            <th class="excel-header" style="width: 130px;">CIUDAD</th>
-            <th class="excel-header" style="width: 80px; text-align: center;">CP</th>
-            <th class="excel-header" style="width: 280px;">DIRECCIÓN</th>
-            <th class="excel-header" style="width: 110px;">OPERADOR</th>
-            <th class="excel-header" style="width: 220px;">NOTAS</th>
-            <th class="excel-header" style="width: 130px;">DETECCIÓN</th>
+            <th class="excel-header" style="width: 260px;">DIRECCIÓN</th>
+            <th class="excel-header sortable-th" style="width: 110px;" onclick="toggleHitsSort('operador')" title="Clic para ordenar por Operador">
+              <div class="th-title-wrap">OPERADOR <span id="th-hits-sort-operador" class="sort-indicator"></span></div>
+            </th>
+            <th class="excel-header" style="width: 200px;">NOTAS</th>
+            <th class="excel-header sortable-th" style="width: 135px;" onclick="toggleHitsSort('checked_at')" title="Clic para ordenar por Fecha">
+              <div class="th-title-wrap">DETECCIÓN <span id="th-hits-sort-checked_at" class="sort-indicator"></span></div>
+            </th>
           </tr>
         </thead>
         <tbody id="hits-table-body">
-          <tr><td colspan="14" style="text-align:center; padding: 40px; color: var(--text-muted);">Cargando Bóveda de HITS...</td></tr>
+          <tr><td colspan="15" style="text-align:center; padding: 40px; color: var(--text-muted);">Cargando Bóveda de HITS...</td></tr>
         </tbody>
       </table>
     </div>
@@ -4890,10 +4996,42 @@ function exportCsv() {
       fetchHits();
     }
 
+    function toggleHitsSort(colKey) {
+      if (hitsSortBy === colKey) {
+        hitsSortDir = hitsSortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        hitsSortBy = colKey;
+        hitsSortDir = (colKey === 'u6licrea' || colKey === 'checked_at') ? 'desc' : 'asc';
+      }
+      hitsPage = 1;
+      updateHitsSortIndicators();
+      const sel = document.getElementById('hits-sort-select');
+      if (sel) {
+        const val = `${hitsSortBy}:${hitsSortDir}`;
+        const matching = Array.from(sel.options).find(o => o.value === val);
+        if (matching) sel.value = val;
+      }
+      fetchHits();
+    }
+
+    function updateHitsSortIndicators() {
+      const keys = ['work_status', 'u6acct', 'curp', 'dmname', 'u6licrea', 'estado', 'ciudad', 'codigo_postal', 'operador', 'checked_at'];
+      keys.forEach(k => {
+        const el = document.getElementById(`th-hits-sort-${k}`);
+        if (el) {
+          if (hitsSortBy === k) {
+            el.innerText = hitsSortDir === 'asc' ? ' ▲' : ' ▼';
+          } else {
+            el.innerText = '';
+          }
+        }
+      });
+    }
+
     async function fetchHits() {
       const tbody = document.getElementById('hits-table-body');
       if (!tbody) return;
-      tbody.innerHTML = '<tr><td colspan="12" style="text-align:center; padding: 30px; color: var(--text-muted);"><span class="spin">⏳</span> Cargando Bóveda de HITS...</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="15" style="text-align:center; padding: 30px; color: var(--text-muted);"><span class="spin">⏳</span> Cargando Bóveda de HITS...</td></tr>';
 
       const params = new URLSearchParams({
         page: hitsPage,
@@ -4926,7 +5064,8 @@ function exportCsv() {
         document.getElementById('btn-hits-next').disabled = data.page >= data.total_pages;
 
         if (currentHits.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="14" style="text-align:center; padding: 40px; color: var(--text-muted);">No hay registros en la Bóveda de HITS con los filtros actuales.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="15" style="text-align:center; padding: 40px; color: var(--text-muted);">No hay registros en la Bóveda de HITS con los filtros actuales.</td></tr>';
+          updateHitsSortIndicators();
           return;
         }
 
@@ -4937,12 +5076,13 @@ function exportCsv() {
           const cardEsc = escapeHtml(h.u6acct || '');
           const cpEsc = escapeHtml(h.codigo_postal || '');
           const phoneEsc = escapeHtml(h.telefono || '');
+          const nameEsc = escapeHtml(h.dmname || '');
+          const estadoEsc = escapeHtml(h.estado || '');
+          const ciudadEsc = escapeHtml(h.ciudad || '');
           const limNum = parseInt(h.u6licrea, 10);
           const limFormatted = !isNaN(limNum) ? '$' + limNum.toLocaleString('es-MX') : '$' + (h.u6licrea || '0');
           const curpEncoded = encodeURIComponent(h.curp || '');
           const santanderLink = `https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?canal=digital&curp=${curpEncoded}`;
-          const estadoEncoded = encodeURIComponent(h.estado || '');
-          const stealthLink = `santabase-stealth://open?curp=${curpEncoded}&estado=${estadoEncoded}`;
 
           html += `
             <tr id="hit-row-${h.id}">
@@ -4955,26 +5095,28 @@ function exportCsv() {
                   <option value="DESCARTADO" ${h.work_status === 'DESCARTADO' ? 'selected' : ''}>⚪ DESCARTADO</option>
                 </select>
               </td>
+              <td style="text-align: center; padding: 4px 6px;">
+                <button class="btn-hit-trabajar" onclick="trabajarLead(${h.id}, '${curpEsc}', '${estadoEsc}', '${cpEsc}', '${ciudadEsc}', '${nameEsc}')" title="Reclamar lead e iniciar navegador con geolocalización">🚀 Trabajar</button>
+              </td>
               <td style="font-family: var(--font-mono); font-weight: 600; color: #60a5fa;">
                 ${cardEsc ? `<span class="copyable-text" onclick="copyInlineText(event, '${cardEsc}', 'Tarjeta')" title="Copiar Tarjeta">💳 ${cardEsc}</span>` : '<span style="color:var(--text-dim);">-</span>'}
               </td>
               <td style="font-family: var(--font-mono);">
                 <span class="copyable-text curp-text" onclick="copyInlineText(event, '${curpEsc}', 'CURP')" title="Copiar CURP">${curpEsc}</span>
-                <a href="${santanderLink}" target="_blank" rel="noopener noreferrer" class="hit-link-santander" onclick="return openHitOnboarding(event, ${h.id}, '${santanderLink}');" title="Reclamar y abrir Onboarding Santander (pestaña normal) con este CURP">🔗 Onboarding</a>
-                <a href="${stealthLink}" class="hit-link-santander" onclick="return openHitStealthBrowser(event, ${h.id}, '${stealthLink}');" title="Reclamar y abrir en Stealth Browser (requiere registrar el protocolo una vez, ver scripts/stealth_browser/README.md)">🖥️ Stealth</a>
+                <a href="${santanderLink}" target="_blank" rel="noopener noreferrer" style="color:var(--text-dim); font-size:10px; margin-left:5px; text-decoration:none;" title="Abrir en pestaña web estándar (respaldo)">↗</a>
               </td>
               <td style="font-weight: 600; color: #fff;">${escapeHtml(h.dmname || 'Sin nombre')}</td>
               <td style="text-align: right; font-family: var(--font-mono); font-weight: 700; color: #34d399;">${limFormatted}</td>
+              <td>${escapeHtml(h.estado || '')}</td>
+              <td>${escapeHtml(h.ciudad || '')}</td>
+              <td style="font-family: var(--font-mono); font-weight: 700; font-size: 11px; text-align: center; color: #a5b4fc;">
+                ${cpEsc ? `<span class="copyable-text" onclick="copyInlineText(event, '${cpEsc}', 'Código Postal')" title="Copiar CP">${cpEsc}</span>` : '<span style="color:var(--text-dim);">-</span>'}
+              </td>
               <td style="font-family: var(--font-mono);">
                 ${phoneEsc ? `<span class="copyable-text" onclick="copyInlineText(event, '${phoneEsc}', 'Teléfono')" title="Copiar teléfono">📞 ${phoneEsc}</span>` : '<span style="color:var(--text-dim);">-</span>'}
               </td>
-              <td>${escapeHtml(h.estado || '')}</td>
-              <td>${escapeHtml(h.ciudad || '')}</td>
-              <td style="font-family: var(--font-mono); font-size: 11px; text-align: center; color: #a5b4fc;">
-                ${cpEsc ? `<span class="copyable-text" onclick="copyInlineText(event, '${cpEsc}', 'Código Postal')" title="Copiar CP">${cpEsc}</span>` : '<span style="color:var(--text-dim);">-</span>'}
-              </td>
               <td style="font-size: 11px; color: var(--text-muted);" title="${escapeHtml(h.direccion || '')}">${escapeHtml(h.direccion || '')}</td>
-              <td style="font-size: 11px; color: #fbbf24;">${escapeHtml(h.operador || '-')}</td>
+              <td style="font-size: 11px; color: #fbbf24;" id="hit-op-${h.id}">${escapeHtml(h.operador || '-')}</td>
               <td>
                 <input type="text" class="hit-notes-input" value="${escapeHtml(h.notas || '')}" 
                        placeholder="+ Nota..."
@@ -4986,9 +5128,10 @@ function exportCsv() {
           `;
         });
         tbody.innerHTML = html;
+        updateHitsSortIndicators();
       } catch(e) {
         console.error(e);
-        tbody.innerHTML = '<tr><td colspan="14" style="text-align:center; padding: 30px; color: #ef4444;">Error cargando registros de hits.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="15" style="text-align:center; padding: 30px; color: #ef4444;">Error cargando registros de hits.</td></tr>';
       }
     }
 
@@ -5019,60 +5162,63 @@ function exportCsv() {
       return await res.json();
     }
 
-    // Reclama el hit (atomico en servidor) y ABRE el Onboarding real de Santander desde la boveda.
-    // La pestana se abre de inmediato (sincrono, en el mismo gesto de clic) para que el navegador no
-    // la bloquee como popup y para que nunca se sienta "atorado" esperando la red; el resultado del
-    // claim solo decide a donde navega esa pestana ya abierta.
-    function openHitOnboarding(event, hitId, url) {
-      event.preventDefault();
-      const newTab = window.open('about:blank', '_blank');
-      const proceed = (finalUrl) => {
-        if (newTab && !newTab.closed) { newTab.location.href = finalUrl; }
-        else { window.open(finalUrl, '_blank'); }
-      };
+    function trabajarLead(hitId, curp, estado, cp, ciudad, name) {
+      const curpEnc = encodeURIComponent(curp || '');
+      const estadoEnc = encodeURIComponent(estado || '');
+      const cpEnc = encodeURIComponent(cp || '');
+      const ciudadEnc = encodeURIComponent(ciudad || '');
+      const nameEnc = encodeURIComponent(name || '');
+      const userEnc = encodeURIComponent((currentUser && (currentUser.display || currentUser.username)) || '');
+      const roleEnc = encodeURIComponent((currentUser && currentUser.role) || 'operator');
+      
+      const stealthUri = `santabase-stealth://open?curp=${curpEnc}&estado=${estadoEnc}&cp=${cpEnc}&ciudad=${ciudadEnc}&name=${nameEnc}&id=${hitId}&user=${userEnc}&role=${roleEnc}`;
+      const launch = () => { window.location.href = stealthUri; };
+
+      // Actualización optimista inmediata en la fila
+      const row = document.getElementById(`hit-row-${hitId}`);
+      if (row) {
+        const select = row.querySelector('.hit-status-select');
+        if (select) {
+          select.value = 'EN_GESTION';
+          select.className = 'hit-status-select status-EN_GESTION';
+        }
+        const opCell = document.getElementById(`hit-op-${hitId}`);
+        if (opCell && currentUser) {
+          opCell.innerText = currentUser.display || currentUser.username || 'Tú';
+        }
+      }
+
       claimHit(hitId).then(result => {
         const hit = result.hit || {};
         if (!result.claimed && hit.operador && hit.operador !== (currentUser && currentUser.display)) {
-          if (newTab && !newTab.closed) newTab.close();
-          const takeOver = confirm(`Este hit ya lo está trabajando ${hit.operador} (estatus ${hit.work_status}).\n¿Abrirlo de todos modos y tomarlo?`);
-          if (!takeOver) { return; }
-          // Reasignacion explicita pedida por el operador actual (no automatica, evita pisar por accidente).
+          const takeOver = confirm(`Este hit ya lo está trabajando ${hit.operador} (estatus ${hit.work_status}).\\n¿Abrirlo de todos modos y tomarlo?`);
+          if (!takeOver) return;
           updateHitStatus(hitId, 'EN_GESTION', null);
-          window.open(url, '_blank');
-          fetchHits();
-          return;
         }
-        proceed(url);
+        if (result.closed_previous_id) {
+          showToast(`✓ Lead anterior #${result.closed_previous_id} cerrado. Operando ${name || curp}...`);
+        } else {
+          showToast(`🚀 Abriendo entorno para ${name || curp} (CP: ${cp || estado || 'N/A'})...`);
+        }
+        launch();
         fetchHits();
       }).catch(() => {
-        // No dejar la pestana en blanco atorada si el claim falla (red caida, etc): abrir igual y avisar.
-        showToast('No se pudo registrar quién trabaja este hit (sin conexión); se abrió de todos modos');
-        proceed(url);
+        showToast(`Abriendo navegador directo (CP: ${cp || estado || 'N/A'})...`);
+        launch();
+        fetchHits();
       });
+    }
+
+    // Funciones de compatibilidad por si se invocan desde atajos o consola
+    function openHitOnboarding(event, hitId, url) {
+      if (event) event.preventDefault();
+      claimHit(hitId).finally(() => { window.open(url, '_blank'); fetchHits(); });
       return false;
     }
 
-    // Reclama el hit y dispara el protocolo santabase-stealth:// (navegador nativo de operador,
-    // pre-llenado con CURP + estado del hit). Navegar a un protocolo custom NO abandona esta
-    // pagina — el navegador solo le pasa el control al SO. Si el operador todavia no registro el
-    // protocolo (scripts/stealth_browser/register_protocol.ps1), el navegador muestra su propio
-    // aviso nativo sin romper nada aqui; por eso NO hace falta manejar ese caso como error.
     function openHitStealthBrowser(event, hitId, uri) {
-      event.preventDefault();
-      const launch = () => { window.location.href = uri; };
-      claimHit(hitId).then(result => {
-        const hit = result.hit || {};
-        if (!result.claimed && hit.operador && hit.operador !== (currentUser && currentUser.display)) {
-          const takeOver = confirm(`Este hit ya lo está trabajando ${hit.operador} (estatus ${hit.work_status}).\n¿Abrirlo de todos modos y tomarlo?`);
-          if (!takeOver) { return; }
-          updateHitStatus(hitId, 'EN_GESTION', null);
-        }
-        launch();
-        fetchHits();
-      }).catch(() => {
-        showToast('No se pudo registrar quién trabaja este hit (sin conexión); se abrió de todos modos');
-        launch();
-      });
+      if (event) event.preventDefault();
+      claimHit(hitId).finally(() => { window.location.href = uri; fetchHits(); });
       return false;
     }
 

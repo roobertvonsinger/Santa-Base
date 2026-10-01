@@ -49,6 +49,49 @@ SESSION_META_FILE = os.path.join(USER_DATA_BASE, "last_session.json")
 SESSION_STORAGE_STATE = os.path.join(USER_DATA_BASE, "storage_state.json")
 OPERATOR_CONFIG_FILE = os.path.join(USER_DATA_BASE, "operator_config.json")
 NETWORK_LOG_FILE = os.path.join(USER_DATA_BASE, "network_debug.log")
+PID_LOCK_FILE = os.path.join(USER_DATA_BASE, "active_browser_instance.pid")
+
+
+def enforce_single_instance(is_superadmin: bool):
+    """Para operadores (no superadmin): garantiza que solo exista UN navegador/proceso a la vez.
+    Si ya hay un proceso previo corriendo en Windows, lo termina limpiamente con taskkill antes
+    de abrir el nuevo lead, evitando acumular procesos huérfanos o ventanas múltiples."""
+    if is_superadmin:
+        return
+    current_pid = os.getpid()
+    if os.path.exists(PID_LOCK_FILE):
+        try:
+            with open(PID_LOCK_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content and content.isdigit():
+                old_pid = int(content)
+                if old_pid != current_pid:
+                    try:
+                        import subprocess
+                        subprocess.run(["taskkill", "/PID", str(old_pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        time.sleep(0.4)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    try:
+        with open(PID_LOCK_FILE, "w", encoding="utf-8") as f:
+            f.write(str(current_pid))
+    except Exception:
+        pass
+
+
+def cleanup_instance_pid():
+    current_pid = os.getpid()
+    if os.path.exists(PID_LOCK_FILE):
+        try:
+            with open(PID_LOCK_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content and int(content) == current_pid:
+                os.remove(PID_LOCK_FILE)
+        except Exception:
+            pass
 
 
 def _log_network_event(line: str):
@@ -79,7 +122,9 @@ MEXICO_FALLBACK_COORDS = {
     "tijuana": {"city": "Tijuana", "region": "Baja California", "lat": 32.5149, "lon": -117.0382, "timezone": "America/Tijuana"},
     "mexicali": {"city": "Mexicali", "region": "Baja California", "lat": 32.6245, "lon": -115.4523, "timezone": "America/Tijuana"},
     "cancun": {"city": "Cancún", "region": "Quintana Roo", "lat": 21.1619, "lon": -86.8515, "timezone": "America/Cancun"},
+    "quintana_roo": {"city": "Cancún", "region": "Quintana Roo", "lat": 21.1619, "lon": -86.8515, "timezone": "America/Cancun"},
     "merida": {"city": "Mérida", "region": "Yucatán", "lat": 20.9674, "lon": -89.5926, "timezone": "America/Merida"},
+    "yucatan": {"city": "Mérida", "region": "Yucatán", "lat": 20.9674, "lon": -89.5926, "timezone": "America/Merida"},
     "veracruz": {"city": "Veracruz", "region": "Veracruz", "lat": 19.1738, "lon": -96.1342, "timezone": "America/Mexico_City"},
     "chiapas": {"city": "Tuxtla Gutiérrez", "region": "Chiapas", "lat": 16.7569, "lon": -93.1292, "timezone": "America/Mexico_City"},
     "leon": {"city": "León", "region": "Guanajuato", "lat": 21.1221, "lon": -101.6826, "timezone": "America/Mexico_City"},
@@ -115,7 +160,7 @@ def normalize_estado(raw: str) -> str:
 
 
 def lookup_region_coords(estado_text: str) -> dict | None:
-    """Busca coordenadas para un nombre de estado (viene de --estado= o del username del proxy)."""
+    """Busca coordenadas para un nombre de estado o ciudad."""
     norm = normalize_estado(estado_text)
     if not norm:
         return None
@@ -123,13 +168,79 @@ def lookup_region_coords(estado_text: str) -> dict | None:
     key_norm = norm.replace(" ", "_")
     if key_norm in MEXICO_FALLBACK_COORDS:
         return MEXICO_FALLBACK_COORDS[key_norm]
-    # Match por substring en ambos sentidos (ej. "ciudad de mexico" contiene "cdmx"? no, al reves:
-    # candidatos como "jalisco" dentro de "estado: jalisco, mx")
+    # Match por substring en llave o en region/city
     for key, loc in MEXICO_FALLBACK_COORDS.items():
         key_spaced = key.replace("_", " ")
-        if key_spaced in norm or norm in key_spaced:
+        region_norm = normalize_estado(loc.get("region", ""))
+        city_norm = normalize_estado(loc.get("city", ""))
+        if (key_spaced in norm or norm in key_spaced or
+            (region_norm and (region_norm in norm or norm in region_norm)) or
+            (city_norm and (city_norm in norm or norm in city_norm))):
             return loc
     return None
+
+
+CP_PREFIX_TO_ESTADO = {
+    "01": "ciudad de mexico", "02": "ciudad de mexico", "03": "ciudad de mexico", "04": "ciudad de mexico",
+    "05": "ciudad de mexico", "06": "ciudad de mexico", "07": "ciudad de mexico", "08": "ciudad de mexico",
+    "09": "ciudad de mexico", "10": "ciudad de mexico", "11": "ciudad de mexico", "12": "ciudad de mexico",
+    "13": "ciudad de mexico", "14": "ciudad de mexico", "15": "ciudad de mexico", "16": "ciudad de mexico",
+    "20": "aguascalientes",
+    "21": "baja california", "22": "baja california",
+    "23": "baja california",
+    "24": "campeche",
+    "25": "coahuila", "26": "coahuila", "27": "coahuila",
+    "28": "colima",
+    "29": "chiapas", "30": "chiapas",
+    "31": "chihuahua", "32": "chihuahua", "33": "chihuahua",
+    "34": "durango", "35": "durango",
+    "36": "guanajuato", "37": "guanajuato", "38": "guanajuato",
+    "39": "guerrero", "40": "guerrero", "41": "guerrero",
+    "42": "hidalgo", "43": "hidalgo",
+    "44": "jalisco", "45": "jalisco", "46": "jalisco", "47": "jalisco", "48": "jalisco", "49": "jalisco",
+    "50": "estado de mexico", "51": "estado de mexico", "52": "estado de mexico", "53": "estado de mexico",
+    "54": "estado de mexico", "55": "estado de mexico", "56": "estado de mexico", "57": "estado de mexico",
+    "58": "michoacan", "59": "michoacan", "60": "michoacan", "61": "michoacan",
+    "62": "morelos",
+    "63": "nayarit",
+    "64": "nuevo leon", "65": "nuevo leon", "66": "nuevo leon", "67": "nuevo leon",
+    "68": "oaxaca", "69": "oaxaca", "70": "oaxaca", "71": "oaxaca",
+    "72": "puebla", "73": "puebla", "74": "puebla", "75": "puebla",
+    "76": "queretaro",
+    "77": "quintana roo",
+    "78": "san luis potosi", "79": "san luis potosi",
+    "80": "sinaloa", "81": "sinaloa", "82": "sinaloa",
+    "83": "sonora", "84": "sonora", "85": "sonora",
+    "86": "tabasco",
+    "87": "tamaulipas", "88": "tamaulipas", "89": "tamaulipas",
+    "90": "tlaxcala",
+    "91": "veracruz", "92": "veracruz", "93": "veracruz", "94": "veracruz", "95": "veracruz", "96": "veracruz",
+    "97": "yucatan",
+    "98": "zacatecas", "99": "zacatecas"
+}
+
+
+def lookup_coords_by_cp_or_estado(cp: str | None, estado: str | None = None, ciudad: str | None = None) -> dict:
+    """Resuelve la ubicación determinista priorizando Código Postal, luego Estado, luego fallback."""
+    if cp:
+        cp_digits = "".join(ch for ch in str(cp) if ch.isdigit()).zfill(5)
+        prefix = cp_digits[:2]
+        if prefix in CP_PREFIX_TO_ESTADO:
+            edo_name = CP_PREFIX_TO_ESTADO[prefix]
+            loc = lookup_region_coords(edo_name)
+            if loc:
+                return {**loc, "cp": cp_digits, "source": f"CP {cp_digits} ({loc.get('region')})"}
+    if estado:
+        loc = lookup_region_coords(estado)
+        if loc:
+            return {**loc, "cp": cp or "-", "source": f"Estado {estado}"}
+    if ciudad:
+        loc = lookup_region_coords(ciudad)
+        if loc:
+            return {**loc, "cp": cp or "-", "source": f"Ciudad {ciudad}"}
+    loc = MEXICO_FALLBACK_COORDS["cdmx"]
+    return {**loc, "cp": cp or "-", "source": "Default CDMX"}
+
 
 
 def load_operator_config() -> dict:
@@ -229,23 +340,11 @@ def get_proxy_location(proxy_dict: dict, region_hint: str | None = None) -> dict
     }
 
 
-def resolve_direct_mode_location(region_hint: str | None) -> dict:
+def resolve_direct_mode_location(region_hint: str | None, cp: str | None = None, ciudad: str | None = None) -> dict:
     """Ubicación a reportar vía geolocation cuando el operador usa su IP local (Directo).
-    El supuesto de 'Directo' es que el operador YA está físicamente en el estado del hit, así
-    que el GPS reportado debe coincidir con el estado del hit (region_hint), nunca quedarse en
-    un default fijo (antes: CDMX hardcodeado en el arranque, o (0,0) en el switch en caliente —
-    ambos mandaban una ubicación que no correspondía al hit real)."""
-    loc = lookup_region_coords(region_hint) if region_hint else None
-    if loc:
-        return {**loc, "matched_hint": True}
-    return {
-        "city": "Ciudad de México",
-        "region": "CDMX",
-        "lat": 19.4326,
-        "lon": -99.1332,
-        "timezone": "America/Mexico_City",
-        "matched_hint": False,
-    }
+    Resuelve deterministamente priorizando Código Postal, luego Estado del hit."""
+    return lookup_coords_by_cp_or_estado(cp, region_hint, ciudad)
+
 
 
 class ProxyManager:
@@ -333,38 +432,45 @@ def load_last_session_meta() -> dict | None:
     return None
 
 
-def show_startup_dialog(default_proxies: list[str], region_hint: str | None = None,
-                         operator_estado: str | None = None, initial_curp: str | None = None) -> dict:
+def show_startup_dialog(
+    default_proxies: list[str],
+    region_hint: str | None = None,
+    operator_estado: str | None = None,
+    initial_curp: str | None = None,
+    cp: str | None = None,
+    ciudad: str | None = None,
+    client_name: str | None = None
+) -> dict:
     last_session = load_last_session_meta()
     if last_session and last_session.get("proxies"):
         default_proxies = last_session["proxies"]
 
-    region_norm = normalize_estado(region_hint) if region_hint else ""
-    operator_norm = normalize_estado(operator_estado) if operator_estado else ""
-    matches_operator = bool(region_norm) and bool(operator_norm) and (
-        region_norm == operator_norm or region_norm in operator_norm or operator_norm in region_norm
-    )
+    # Ubicación determinista resuelta desde Código Postal o Estado del lead
+    loc = lookup_coords_by_cp_or_estado(cp, region_hint, ciudad)
 
     result = {
-        "use_proxy": not matches_operator,  # si el operador ya esta en el estado del cliente, Directo por default
+        "use_proxy": False,  # Directo por default: sin proxies obligatorios
         "proxies": default_proxies,
         "cancelled": False,
         "restore_session": bool(last_session),
         "session_meta": last_session,
         "region_hint": region_hint,
         "curp": initial_curp,
+        "cp": cp,
+        "ciudad": ciudad,
+        "loc": loc
     }
 
     root = tk.Tk()
-    root.title("Stealth Mobile Browser - Configuración")
-    dialog_h = 560 if last_session else 480
-    root.geometry(f"660x{dialog_h}")
+    root.title("📍 Confirmación de Ubicación y Lead — Santa Base")
+    dialog_w, dialog_h = 600, 510 if last_session else 450
+    root.geometry(f"{dialog_w}x{dialog_h}")
     root.resizable(False, False)
 
     root.update_idletasks()
-    x = max(0, (root.winfo_screenwidth() - 660) // 2)
+    x = max(0, (root.winfo_screenwidth() - dialog_w) // 2)
     y = max(0, (root.winfo_screenheight() - dialog_h) // 2)
-    root.geometry(f"660x{dialog_h}+{x}+{y}")
+    root.geometry(f"{dialog_w}x{dialog_h}+{x}+{y}")
 
     style = ttk.Style()
     try:
@@ -375,103 +481,87 @@ def show_startup_dialog(default_proxies: list[str], region_hint: str | None = No
     frame = ttk.Frame(root, padding=16)
     frame.pack(fill="both", expand=True)
 
-    header = ttk.Label(frame, text="📱 Stealth Mobile Browser (Sovereign Edition)", font=("Segoe UI", 12, "bold"))
+    header = ttk.Label(frame, text="📱 Operación de Lead — Onboarding Santander", font=("Segoe UI", 12, "bold"))
     header.pack(anchor="w", pady=(0, 6))
 
-    # ── Pista de region objetivo del hit (si vino de la boveda con --estado=) ──
-    if region_hint:
-        hint_frame = ttk.LabelFrame(frame, text="🎯 Este hit es de", padding=10)
-        hint_frame.pack(fill="x", pady=(0, 10))
-        hint_text = f"{region_hint}"
-        if matches_operator:
-            hint_text += "  —  ✅ Coincide con tu ubicación configurada: usa CONEXIÓN DIRECTA (tu propia IP ya es de ahí)."
-        else:
-            hint_text += "  —  Pega abajo un proxy residencial de esa región/estado, o el navegador puede ser descartado por Santander."
-        ttk.Label(hint_frame, text=hint_text, wraplength=610, foreground=("#0a7a2a" if matches_operator else "#aa4400")).pack(anchor="w")
+    # ── Tarjeta de datos del Lead ──
+    lead_frame = ttk.LabelFrame(frame, text="🎯 Datos del Cliente / Lead", padding=10)
+    lead_frame.pack(fill="x", pady=(0, 8))
 
-    if initial_curp:
-        curp_frame = ttk.LabelFrame(frame, text="CURP a trabajar", padding=6)
-        curp_frame.pack(fill="x", pady=(0, 10))
-        ttk.Label(curp_frame, text=initial_curp, font=("Consolas", 11, "bold")).pack(anchor="w")
+    txt_curp = initial_curp or "Sin CURP especificado"
+    txt_name = client_name or "Cliente Santander"
+    txt_cp = cp if cp else "No asignado"
+    txt_lugar = f"{ciudad or ''}, {region_hint or ''}".strip(', ') or "México"
 
-    session_choice_var = tk.StringVar(value="restore" if last_session else "clean")
+    ttk.Label(lead_frame, text=f"CURP: {txt_curp}", font=("Consolas", 10, "bold"), foreground="#0055aa").pack(anchor="w")
+    if client_name:
+        ttk.Label(lead_frame, text=f"Nombre: {txt_name}", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(2, 0))
+    ttk.Label(lead_frame, text=f"Código Postal: {txt_cp}  |  Ubicación: {txt_lugar}", font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
 
-    if last_session:
-        time_str = last_session.get("time_str", "reciente")
-        last_url = last_session.get("last_url", "Santander Onboarding")
-        if len(last_url) > 65:
-            last_url = last_url[:62] + "..."
+    # ── Confirmación de GPS vinculado al Lead ──
+    gps_frame = ttk.LabelFrame(frame, text="📍 Ubicación GPS Asignada al Navegador", padding=10)
+    gps_frame.pack(fill="x", pady=(0, 8))
 
-        rec_frame = ttk.LabelFrame(frame, text="🔄 Recuperación de Sesión", padding=10)
-        rec_frame.pack(fill="x", pady=(0, 10))
+    gps_desc = f"Lat: {loc['lat']} , Lon: {loc['lon']}  ({loc.get('source', loc.get('region', 'México'))})"
+    ttk.Label(gps_frame, text=gps_desc, font=("Consolas", 9, "bold"), foreground="#0a7a2a").pack(anchor="w")
+    ttk.Label(gps_frame, text="✓ El navegador simulará estar físicamente en esta zona postal ante Santander y FAD.", font=("Segoe UI", 8), foreground="#444").pack(anchor="w", pady=(3, 0))
 
-        rb_restore = ttk.Radiobutton(
-            rec_frame,
-            text=f"Recuperar última sesión (Guardada: {time_str})\n↳ Última página: {last_url}",
-            variable=session_choice_var,
-            value="restore"
-        )
-        rb_restore.pack(anchor="w", pady=(0, 4))
+    # ── Red / Proxy (Opcional, no obligatorio) ──
+    net_frame = ttk.LabelFrame(frame, text="🌐 Conexión de Red (Opcional)", padding=10)
+    net_frame.pack(fill="x", pady=(0, 8))
 
-        rb_clean = ttk.Radiobutton(
-            rec_frame,
-            text="Iniciar sesión limpia (Desde cero)",
-            variable=session_choice_var,
-            value="clean"
-        )
-        rb_clean.pack(anchor="w", pady=(2, 0))
-
-    mode_var = tk.StringVar(value="direct" if matches_operator else "proxy")
+    mode_var = tk.StringVar(value="direct")
 
     def on_mode_change():
         if mode_var.get() == "proxy":
-            text_proxies.config(state="normal", bg="#ffffff")
+            ent_proxy.config(state="normal")
         else:
-            text_proxies.config(state="disabled", bg="#f0f0f0")
-
-    rb_proxy = ttk.Radiobutton(
-        frame,
-        text="🌐 Usar Lista de Proxies Residenciales (1 por línea, hasta 10) — región del proxy debe acercarse a la del cliente:",
-        variable=mode_var,
-        value="proxy",
-        command=on_mode_change
-    )
-    rb_proxy.pack(anchor="w", pady=(0, 4))
-
-    text_proxies = scrolledtext.ScrolledText(frame, width=74, height=5, font=("Consolas", 8))
-    text_proxies.insert("1.0", "\n".join(default_proxies))
-    text_proxies.pack(anchor="w", fill="x", pady=(0, 8))
+            ent_proxy.config(state="disabled")
 
     rb_direct = ttk.Radiobutton(
-        frame,
-        text="⚡ Conexión Directa (Sin Proxy) — usa TU propia IP local. Úsala si tú ya estás físicamente en el estado del cliente.",
+        net_frame,
+        text="⚡ Conexión Directa (Tu propia IP) — Recomendado, arranque inmediato sin fricción",
         variable=mode_var,
         value="direct",
         command=on_mode_change
     )
-    rb_direct.pack(anchor="w", pady=(0, 8))
+    rb_direct.pack(anchor="w", pady=(0, 4))
 
-    # ── Config del operador: su estado real, para el auto-match de "usa Directo" en la próxima vez ──
-    op_frame = ttk.LabelFrame(frame, text="Tu ubicación real (para sugerir Directo automáticamente)", padding=6)
-    op_frame.pack(fill="x", pady=(0, 8))
-    ent_operator = ttk.Entry(op_frame, width=30)
-    ent_operator.insert(0, operator_estado or "")
-    ent_operator.pack(side="left", padx=(0, 6))
-    ttk.Label(op_frame, text="(ej. Jalisco, Ciudad de México, Durango — se guarda para la próxima vez)", font=("Segoe UI", 8)).pack(side="left")
+    rb_proxy = ttk.Radiobutton(
+        net_frame,
+        text="🌐 Usar Proxy Residencial (Opcional):",
+        variable=mode_var,
+        value="proxy",
+        command=on_mode_change
+    )
+    rb_proxy.pack(anchor="w", pady=(0, 2))
 
-    on_mode_change()
+    ent_proxy = ttk.Entry(net_frame, font=("Consolas", 9), state="disabled")
+    if default_proxies and len(default_proxies) > 0:
+        ent_proxy.insert(0, default_proxies[0])
+    ent_proxy.pack(fill="x", pady=(0, 2))
+    ttk.Label(net_frame, text="* Puedes modificar o agregar proxies en cualquier momento desde el control flotante.", font=("Segoe UI", 8, "italic"), foreground="#666").pack(anchor="w")
+
+    # ── Recuperación de sesión previa si existe ──
+    session_choice_var = tk.StringVar(value="clean")
+    if last_session:
+        time_str = last_session.get("time_str", "reciente")
+        rec_frame = ttk.LabelFrame(frame, text="🔄 Sesión Previa", padding=8)
+        rec_frame.pack(fill="x", pady=(0, 6))
+        rb_restore = ttk.Radiobutton(rec_frame, text=f"Restaurar última sesión ({time_str})", variable=session_choice_var, value="restore")
+        rb_restore.pack(anchor="w")
+        rb_clean = ttk.Radiobutton(rec_frame, text="Iniciar sesión limpia (Recomendado)", variable=session_choice_var, value="clean")
+        rb_clean.pack(anchor="w")
 
     btn_frame = ttk.Frame(frame)
     btn_frame.pack(anchor="e", fill="x", pady=(8, 0))
 
     def on_start():
         result["use_proxy"] = (mode_var.get() == "proxy")
-        lines = [line.strip() for line in text_proxies.get("1.0", tk.END).splitlines() if line.strip()]
-        result["proxies"] = lines[:10] if lines else default_proxies
+        custom_proxy = ent_proxy.get().strip()
+        if custom_proxy and result["use_proxy"]:
+            result["proxies"] = [custom_proxy] + [p for p in default_proxies if p != custom_proxy]
         result["restore_session"] = (session_choice_var.get() == "restore")
-        op_val = ent_operator.get().strip()
-        if op_val:
-            save_operator_config({"estado": op_val})
         root.destroy()
 
     def on_cancel():
@@ -481,25 +571,31 @@ def show_startup_dialog(default_proxies: list[str], region_hint: str | None = No
     btn_cancel = ttk.Button(btn_frame, text="Cancelar", command=on_cancel)
     btn_cancel.pack(side="right", padx=(10, 0))
 
-    btn_ok = ttk.Button(btn_frame, text="Iniciar Navegador", command=on_start)
+    btn_ok = ttk.Button(btn_frame, text="🚀 Iniciar Navegador", command=on_start)
     btn_ok.pack(side="right")
 
     root.protocol("WM_DELETE_WINDOW", on_cancel)
-    root.focus_force()
+    root.bind("<Return>", lambda e: on_start())
+    btn_ok.focus_set()
     root.mainloop()
 
     return result
 
 
 class ProxySwitcherWidget:
-    def __init__(self, root: tk.Tk, proxy_mgr: ProxyManager, cmd_queue: queue.Queue, region_hint: str | None = None):
+    def __init__(self, root: tk.Tk, proxy_mgr: ProxyManager, cmd_queue: queue.Queue,
+                 region_hint: str | None = None, cp: str | None = None, ciudad: str | None = None,
+                 initial_curp: str | None = None):
         self.root = root
         self.proxy_mgr = proxy_mgr
         self.cmd_queue = cmd_queue
         self.region_hint = region_hint
+        self.cp = cp
+        self.ciudad = ciudad
+        self.initial_curp = initial_curp
 
-        root.title("⚡ Control de Proxies")
-        root.geometry("460x320")
+        root.title("⚡ Control de Proxies y Ubicación")
+        root.geometry("460x340")
         root.attributes("-topmost", True)
         root.resizable(False, False)
         root.geometry("+540+40")
@@ -510,8 +606,16 @@ class ProxySwitcherWidget:
         header = ttk.Label(frame, text="🔄 Conmutador de Proxies en Vivo", font=("Segoe UI", 11, "bold"))
         header.pack(anchor="w", pady=(0, 4))
 
-        if region_hint:
-            ttk.Label(frame, text=f"🎯 Región objetivo del hit: {region_hint}", font=("Segoe UI", 8, "bold"), foreground="#aa4400").pack(anchor="w", pady=(0, 4))
+        lead_info_txt = []
+        if initial_curp:
+            lead_info_txt.append(f"CURP: {initial_curp}")
+        if cp:
+            lead_info_txt.append(f"CP: {cp}")
+        elif region_hint:
+            lead_info_txt.append(f"Estado: {region_hint}")
+
+        if lead_info_txt:
+            ttk.Label(frame, text="🎯 Lead: " + " | ".join(lead_info_txt), font=("Segoe UI", 8, "bold"), foreground="#aa4400").pack(anchor="w", pady=(0, 4))
 
         self.lbl_active = ttk.Label(frame, text="Proxy Activo: Cargando...", font=("Segoe UI", 9, "bold"), foreground="#0055aa")
         self.lbl_active.pack(anchor="w", pady=(2, 2))
@@ -566,7 +670,7 @@ class ProxySwitcherWidget:
         cur = self.proxy_mgr.get_current()
         idx = self.proxy_mgr.current_idx + 1
         total = max(1, len(self.proxy_mgr.proxies))
-        loc = get_proxy_location(cur, self.region_hint) if cur else resolve_direct_mode_location(self.region_hint)
+        loc = get_proxy_location(cur, self.region_hint) if cur else resolve_direct_mode_location(self.region_hint, self.cp, self.ciudad)
 
         if cur:
             self.lbl_active.config(text=f"Proxy [{idx}/{total}]: {cur.get('host')}:{cur.get('port')}")
@@ -574,7 +678,7 @@ class ProxySwitcherWidget:
             self.lbl_geo.config(text=f"📍 {loc.get('city')}, {loc.get('region')} — {match_note}")
         else:
             self.lbl_active.config(text="Modo: Conexión Directa (tu IP local)")
-            self.lbl_geo.config(text="📍 Usando tu ubicación física real")
+            self.lbl_geo.config(text=f"📍 GPS Simulado: {loc.get('lat')}, {loc.get('lon')} [{loc.get('source', '')}]")
 
         self.combo["values"] = self._combo_options()
         if self.proxy_mgr.proxies:
@@ -608,7 +712,7 @@ class ProxySwitcherWidget:
 
     def apply_switch(self):
         cur = self.proxy_mgr.get_current()
-        loc = get_proxy_location(cur, self.region_hint) if cur else resolve_direct_mode_location(self.region_hint)
+        loc = get_proxy_location(cur, self.region_hint) if cur else resolve_direct_mode_location(self.region_hint, self.cp, self.ciudad)
         self.update_display()
         self.lbl_status.config(text=f"Cambiando a {loc.get('city')}... (tu sesión/cookies se conservan)", foreground="#0055aa")
         self.cmd_queue.put(("switch_proxy", (cur, loc)))
@@ -620,10 +724,11 @@ class ProxySwitcherWidget:
 
 def browser_worker(proxy_mgr: ProxyManager, cmd_queue: queue.Queue, stop_event: threading.Event,
                     restore_session: bool = False, session_meta: dict | None = None,
-                    region_hint: str | None = None, initial_curp: str | None = None):
+                    region_hint: str | None = None, initial_curp: str | None = None,
+                    cp: str | None = None, ciudad: str | None = None):
     browser_bin, browser_name = find_browser_executable()
     cur = proxy_mgr.get_current()
-    loc = get_proxy_location(cur, region_hint) if cur else resolve_direct_mode_location(region_hint)
+    loc = get_proxy_location(cur, region_hint) if cur else resolve_direct_mode_location(region_hint, cp, ciudad)
 
     MOBILE_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
 
@@ -919,12 +1024,22 @@ def browser_worker(proxy_mgr: ProxyManager, cmd_queue: queue.Queue, stop_event: 
 
 def _parse_cli_args() -> dict:
     """Acepta dos formas de invocacion:
-    1) Flags sueltas: --curp=XXX --estado=JALISCO --operator-estado=Jalisco
+    1) Flags sueltas: --curp=XXX --estado=JALISCO --cp=44100 --ciudad=Guadalajara --name="Juan" --operator-estado=Jalisco --user=Magdiel --role=operator
     2) Un solo argumento con el protocolo custom registrado en Windows:
-       santabase-stealth://open?curp=XXX&estado=JALISCO
+       santabase-stealth://open?curp=XXX&estado=JALISCO&cp=44100&ciudad=Guadalajara&name=Juan&user=Magdiel&role=operator
        (asi es como Windows invoca el handler cuando se hace clic en el link desde la boveda web)
     """
-    args = {"curp": None, "estado": None, "operator_estado": None}
+    args = {
+        "curp": None,
+        "estado": None,
+        "operator_estado": None,
+        "cp": None,
+        "ciudad": None,
+        "name": None,
+        "hit_id": None,
+        "role": None,
+        "user": None
+    }
     for a in sys.argv[1:]:
         a = a.strip().strip('"')
         if a.lower().startswith("santabase-stealth:"):
@@ -932,12 +1047,10 @@ def _parse_cli_args() -> dict:
                 from urllib.parse import urlparse, parse_qs
                 parsed = urlparse(a)
                 qs = parse_qs(parsed.query)
-                if "curp" in qs and qs["curp"]:
-                    args["curp"] = qs["curp"][0].strip()
-                if "estado" in qs and qs["estado"]:
-                    args["estado"] = qs["estado"][0].strip()
-                if "operator_estado" in qs and qs["operator_estado"]:
-                    args["operator_estado"] = qs["operator_estado"][0].strip()
+                for k in ["curp", "estado", "operator_estado", "cp", "ciudad", "name", "id", "hit_id", "role", "user"]:
+                    if k in qs and qs[k]:
+                        dest_key = "hit_id" if k in ("id", "hit_id") else k
+                        args[dest_key] = qs[k][0].strip()
             except Exception:
                 pass  # URI mal formado: no truena, simplemente arranca sin pre-llenar nada
         elif a.startswith("--curp="):
@@ -946,6 +1059,18 @@ def _parse_cli_args() -> dict:
             args["estado"] = a.split("=", 1)[1].strip()
         elif a.startswith("--operator-estado="):
             args["operator_estado"] = a.split("=", 1)[1].strip()
+        elif a.startswith("--cp="):
+            args["cp"] = a.split("=", 1)[1].strip()
+        elif a.startswith("--ciudad="):
+            args["ciudad"] = a.split("=", 1)[1].strip()
+        elif a.startswith("--name="):
+            args["name"] = a.split("=", 1)[1].strip()
+        elif a.startswith("--role="):
+            args["role"] = a.split("=", 1)[1].strip()
+        elif a.startswith("--user="):
+            args["user"] = a.split("=", 1)[1].strip()
+        elif a.startswith("--id=") or a.startswith("--hit-id="):
+            args["hit_id"] = a.split("=", 1)[1].strip()
     return args
 
 
@@ -957,11 +1082,28 @@ def main():
             pass
 
     cli = _parse_cli_args()
-    op_cfg = load_operator_config()
-    operator_estado = cli["operator_estado"] or os.environ.get("SANTABASE_OPERATOR_ESTADO") or op_cfg.get("estado")
+    is_superadmin = (cli.get("role") == "superadmin" or (cli.get("user") or "").lower() == "robertvs")
+    enforce_single_instance(is_superadmin)
 
-    cfg = show_startup_dialog(DEFAULT_PROXIES, region_hint=cli["estado"], operator_estado=operator_estado, initial_curp=cli["curp"])
+    op_cfg = load_operator_config()
+    operator_estado = cli.get("operator_estado") or os.environ.get("SANTABASE_OPERATOR_ESTADO") or op_cfg.get("estado")
+    cp = cli.get("cp")
+    ciudad = cli.get("ciudad")
+    name = cli.get("name")
+    curp = cli.get("curp")
+    estado = cli.get("estado")
+
+    cfg = show_startup_dialog(
+        DEFAULT_PROXIES,
+        region_hint=estado,
+        operator_estado=operator_estado,
+        initial_curp=curp,
+        cp=cp,
+        ciudad=ciudad,
+        client_name=name
+    )
     if cfg.get("cancelled"):
+        cleanup_instance_pid()
         sys.exit(0)
 
     direct_mode = not cfg.get("use_proxy", True)
@@ -970,6 +1112,8 @@ def main():
     session_meta = cfg.get("session_meta")
     region_hint = cfg.get("region_hint")
     initial_curp = cfg.get("curp")
+    cp = cfg.get("cp")
+    ciudad = cfg.get("ciudad")
 
     if not restore_session:
         if os.path.exists(SESSION_STORAGE_STATE):
@@ -989,16 +1133,17 @@ def main():
 
     worker_t = threading.Thread(
         target=browser_worker,
-        args=(proxy_mgr, cmd_queue, stop_event, restore_session, session_meta, region_hint, initial_curp),
+        args=(proxy_mgr, cmd_queue, stop_event, restore_session, session_meta, region_hint, initial_curp, cp, ciudad),
         daemon=True
     )
     worker_t.start()
 
     root = tk.Tk()
-    switcher = ProxySwitcherWidget(root, proxy_mgr, cmd_queue, region_hint=region_hint)
+    switcher = ProxySwitcherWidget(root, proxy_mgr, cmd_queue, region_hint=region_hint, cp=cp, ciudad=ciudad, initial_curp=initial_curp)
 
     def poll():
         if stop_event.is_set():
+            cleanup_instance_pid()
             root.destroy()
         else:
             root.after(500, poll)
@@ -1006,11 +1151,15 @@ def main():
     def on_close():
         cmd_queue.put(("stop", None))
         stop_event.set()
+        cleanup_instance_pid()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.after(500, poll)
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        cleanup_instance_pid()
 
 
 if __name__ == "__main__":

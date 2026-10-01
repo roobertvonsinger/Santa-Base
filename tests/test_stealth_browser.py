@@ -107,10 +107,13 @@ def test_proxy_manager_add_invalid_returns_none_and_does_not_corrupt_state():
 def test_parse_cli_args_flags():
     old_argv = sys.argv
     try:
-        sys.argv = ["prog", "--curp=OIRM840921HDFRMR05", "--estado=JALISCO", "--operator-estado=Jalisco"]
+        sys.argv = ["prog", "--curp=OIRM840921HDFRMR05", "--estado=JALISCO", "--cp=44100", "--ciudad=Guadalajara", "--name=Pedro", "--operator-estado=Jalisco"]
         args = lmb._parse_cli_args()
         assert args["curp"] == "OIRM840921HDFRMR05"
         assert args["estado"] == "JALISCO"
+        assert args["cp"] == "44100"
+        assert args["ciudad"] == "Guadalajara"
+        assert args["name"] == "Pedro"
         assert args["operator_estado"] == "Jalisco"
     finally:
         sys.argv = old_argv
@@ -119,10 +122,13 @@ def test_parse_cli_args_flags():
 def test_parse_cli_args_uri_scheme():
     old_argv = sys.argv
     try:
-        sys.argv = ["prog", "santabase-stealth://open?curp=OIRM840921HDFRMR05&estado=Durango"]
+        sys.argv = ["prog", "santabase-stealth://open?curp=OIRM840921HDFRMR05&estado=Durango&cp=34000&ciudad=Durango&name=Juan"]
         args = lmb._parse_cli_args()
         assert args["curp"] == "OIRM840921HDFRMR05"
         assert args["estado"] == "Durango"
+        assert args["cp"] == "34000"
+        assert args["ciudad"] == "Durango"
+        assert args["name"] == "Juan"
     finally:
         sys.argv = old_argv
 
@@ -142,6 +148,34 @@ def test_parse_cli_args_no_args_returns_all_none():
     try:
         sys.argv = ["prog"]
         args = lmb._parse_cli_args()
-        assert args == {"curp": None, "estado": None, "operator_estado": None}
+        assert args == {
+            "curp": None,
+            "estado": None,
+            "operator_estado": None,
+            "cp": None,
+            "ciudad": None,
+            "name": None,
+            "hit_id": None,
+            "role": None,
+            "user": None
+        }
     finally:
         sys.argv = old_argv
+
+
+def test_lookup_coords_by_cp_or_estado():
+    # CP Jalisco (prefijo 44)
+    loc_cp = lmb.lookup_coords_by_cp_or_estado("44100", "Jalisco", "Guadalajara")
+    assert loc_cp["city"] == "Guadalajara"
+    assert loc_cp["region"] == "Jalisco"
+    assert loc_cp["lat"] == 20.6597
+    assert loc_cp["cp"] == "44100"
+
+    # CP Nuevo León (prefijo 64)
+    loc_nl = lmb.lookup_coords_by_cp_or_estado("64000")
+    assert loc_nl["city"] == "Monterrey"
+    assert loc_nl["region"] == "Nuevo León"
+
+    # Fallback por estado
+    loc_edo = lmb.lookup_coords_by_cp_or_estado(None, "Yucatán")
+    assert loc_edo["city"] == "Mérida"

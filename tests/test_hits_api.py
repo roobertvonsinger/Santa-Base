@@ -155,3 +155,34 @@ def test_claim_hit_requires_auth():
 def test_claim_hit_404_for_missing_id():
     res = client.post("/api/hits/9999/claim", cookies=auth_cookies())
     assert res.status_code == 404
+
+def test_claim_hit_operator_single_lead_auto_closes_previous():
+    conn = get_db_connection()
+    conn.execute("""
+        INSERT INTO santander_hits (id, u6acct, curp, u6rfc, dmname, estado, ciudad, u6licrea, work_status)
+        VALUES (2, '2222', 'CURP2222', 'RFC2', 'NAME 2', 'JALISCO', 'GDL', '$200,000', 'NUEVO'),
+               (3, '3333', 'CURP3333', 'RFC3', 'NAME 3', 'JALISCO', 'GDL', '$300,000', 'NUEVO')
+    """)
+    conn.commit()
+    conn.close()
+
+    # Luisito (operator) reclama hit 2
+    res1 = client.post("/api/hits/2/claim", cookies=other_operator_cookies())
+    assert res1.json()["claimed"] is True
+    assert res1.json()["hit"]["work_status"] == "EN_GESTION"
+    assert res1.json()["hit"]["operador"] == "Luisito"
+    assert res1.json()["closed_previous_id"] is None
+
+    # Luisito reclama hit 3 -> el hit 2 anterior se auto-cierra
+    res2 = client.post("/api/hits/3/claim", cookies=other_operator_cookies())
+    assert res2.json()["claimed"] is True
+    assert res2.json()["hit"]["work_status"] == "EN_GESTION"
+    assert res2.json()["closed_previous_id"] == 2
+
+    # Verificar en BD que hit 2 ahora está CERRADO
+    conn = get_db_connection()
+    row2 = conn.execute("SELECT work_status, notas FROM santander_hits WHERE id = 2").fetchone()
+    assert row2[0] == "CERRADO"
+    assert "Auto-cerrado" in row2[1]
+    conn.close()
+
