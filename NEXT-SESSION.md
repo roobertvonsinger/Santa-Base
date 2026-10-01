@@ -14,7 +14,7 @@
 > Santa Base almacena 4.89M registros de clientes antiguos de Santander. La comanda oficial es la **depuración y reactivación estratégica de esta cartera rezagada**, previo a una actualización mayor de la plataforma bancaria de Santander que exigirá la recaptura masiva de usuarios vía su flujo de Cuenta Digital.
 >
 > **REGLAS Y FILTROS CLAVE:**
-> 1. **Filtro de Edad (Inmediato):** Descartar personas mayores a 65 años (inelegibles para el producto digital).
+> 1. **Filtro de Edad (Inmediato):** Descartar personas mayores a 65 años (inelegibles para el producto digital). Umbral canónico: nacidos estrictamente a partir de `1963-01-01` (`born_after >= 1963-01-01`).
 > 2. **Fase 1 (Comprobación y Filtrado):** Identificar en el sitio de onboarding cuáles clientes necesitan actualizar sus datos de contacto (`contact-data` / `confirm-contact`) vs cuáles califican directo o están bloqueados.
 > 3. **Fase 2 (Ventaja Competitiva y Máximo Valor):** Detección de fallos y bugs en el flujo bancario, prueba E2E de la actualización de datos y culminación de la reinscripción del cliente como usuario activo. Aquí radica la ventaja frente a las demás oficinas/outsourcings competidores.
 >
@@ -26,52 +26,67 @@
 
 ## 🔧 Bitácora de Sesión 2026-09-30 — Estado de Componentes
 
-1. **Bóveda HITS y Visor (`app.py`):**
-   - Scroll restaurado en `#hits-grid-container` (guard `currentViewMode !== 'general'`).
-   - Claim atómico de hits vía `POST /api/hits/{id}/claim` y botón nativo `santabase-stealth://`.
-   - 50/50 tests en verde (`pytest tests/`).
-2. **Motor de Verificación HTTP Canónico (`santander_runner.py`):**
-   - Reemplazado Playwright pesado por pipeline HTTP directo de 4 pasos (`curl_cffi` impersonando Chrome 120 TLS) a través de `proxy001`.
-   - Consumo por verificación reducido de ~10MB (ad-tech tracking) a <15KB (~99.8% ahorro de cuota).
-   - Tiempo de ejecución reducido de 40s a ~6.6s con extracción de nombre RENAPO y folio bancario.
-   - Clasificación canónica: `datos_contacto_02` ➔ `ON` (HIT limbo para captura fresca), `datos_contacto_01`/`03` ➔ `OFF` (contacto previo enmascarado OTP), derivaciones/rechazos ➔ `OFF`, fallas de red ➔ `RETRY`.
-   - SuperNet (`santanderweb.santander.com.mx`): Auditado y descartado para chequeo de tarjetas debido a sensor activo de Akamai Bot Manager v3 (`/akam/13/9d7d30b`) y riesgo de bloqueo de credenciales.
-3. **Navegador de Operador (`scripts/stealth_browser/launch_mobile_browser.py`):**
-   - Centralizado y limpio (se podó `santabase_stealth_lite.py`).
-   - Geolocation por estado del lead y bypass de ad-tech.
-4. **Purger Automático (`santander_purger.py`):**
-   - Integrado de forma transparente al nuevo `check_single_curp` HTTP de `santander_runner.py`. Listo para despliegue en VPS KVM4.
+1. **Bóveda HITS y Visor Simplificado (`app.py`):**
+   - Sustitución de los dos botones redundantes por un único botón `🚀 Trabajar` en columna dedicada.
+   - Cabeceras de `hits-table` interactivas y ordenables (`toggleHitsSort`, indicadores `▲`/`▼`) por estatus, tarjeta, curp, nombre, crédito, estado, ciudad, cp, operador y fecha.
+   - Búsqueda en HITS expandida para indexar `codigo_postal`, `ciudad` y `u6acct`.
+   - Control de concurrencia en `/api/hits/{id}/claim`: auto-cierre del lead anterior del operador (`CERRADO` con nota de auditoría) si abre otro. Superadmin (`Robertvs`) 100% exento.
+   - Transmisión de parámetros completos (`curp`, `estado`, `cp`, `ciudad`, `name`, `user`, `role`) vía protocolo `santabase-stealth://`.
+2. **Navegador de Operador (`scripts/stealth_browser/launch_mobile_browser.py`):**
+   - Mapeo de prefijos postales mexicanos `CP_PREFIX_TO_ESTADO` y resolución de coordenadas GPS exactas por CP o Estado.
+   - Ficha visual de datos del lead al arrancar con conexión directa local por default (sin ventana confusa de proxies).
+   - Control estricto de instancia única por operador vía `PID_LOCK_FILE` y `taskkill` de procesos huérfanos. Superadmin exento.
+3. **Purger Automático y Regla de Edad (`santander_purger.py`):**
+   - Corrección del umbral de nacimiento a `1963-01-01` (excluye 1962 y anteriores) en código y en servicio `/etc/systemd/system/santander-purger.service` en Karen VPS KVM4.
+   - Depuración de BD: 18 hits `<= 1962` actualizados a `DESCARTADO`. 91 hits `NUEVO` activos en la bóveda ($\ge 1963$).
+4. **Verificación Automatizada:**
+   - 52/52 pruebas en verde (`pytest tests/`).
 
 ---
 
-## 📌 Contexto Inmediato
-- El visor de 4.89M registros ya cuenta con orden jerárquico (`SELECTION` | `CURP` | `RFC` | `NOMBRE` | `ESTADO` | `CIUDAD` | `CP` | `DIRECCIÓN` | `LÍMITE` | `RESTO`), rescate y contraste de fecha de nacimiento dentro del RFC, multiselección con `Ctrl` / `Shift` / arrastre, tiradores de resize de columnas en Excel, y exportación TSV matricial.
-- **Design System de Tokens (Auditoría UI Resuelta)**: Tipografía escalada a 13px base / 12.5px mono, celdas de 36px con padding `6px 10px`, segmented control unificado para filtros predefinidos, toolbar en 4 clusters, micro-tarjetas KPI con jerarquía visual y sistema semántico de color de 3 niveles.
-- **Integración Parches Claude + Fase 2**:
-  - Selección de rango vertical de celdas por arrastre y `Ctrl` + arrastre multi-segmento con botón y atajo de copia rápida.
-  - Wordmark branding `SANTA 🙏🏻 BASE` en Top Bar y Lock Screen.
-  - Buscador global ergonómico con botón de limpieza instantánea `✕` y atajo universal `Ctrl+K`.
-  - Menú contextual estilo acrílico con atajos visuales, detección de colisión con los bordes de la ventana y acción directa de copia de rango.
-  - Reglas de diseño responsive que eliminan traslapes en cualquier resolución (pantallas medianas y compactas).
-- **Rendimiento SQLite**: Mapeo en RAM (`mmap_size = 2GB`), WAL activo e índice funcional `idx_santander_licrea_int` logrando ordenamiento numérico en **0.55 ms**.
-- **Pruebas Automatizadas**: 7/7 tests en verde (`pytest tests/`), incluyendo suite de tokens, suite de fase 2 y validación visual interactiva en Chromium con Playwright.
+## 📌 Punto de Arranque Inmediato (Sesión Limpia)
+
+> [!IMPORTANT]
+> ### 🚨 PRIORIDAD #1: Diagnóstico de Fallo en Endpoint de Formalización N2
+> **Problema a resolver:** Descubrir la causa exacta del error al ejecutar el request de alta durante la aplicación:
+> ```javascript
+> fetch("https://onboarding.santander.com.mx/api/v1/obu/case/formalizada/N2/account-registry/alta", {
+>   "headers": {
+>     "accept": "application/json, text/plain, */*",
+>     "accept-language": "es-419,es;q=0.9",
+>     "cache-control": "no-cache",
+>     "content-type": "application/json",
+>     "pragma": "no-cache"
+>   },
+>   "referrer": "https://onboarding.santander.com.mx/",
+>   "body": "{\"data\":{\"contract\":true,\"promotional\":true}}",
+>   "method": "POST",
+>   "mode": "cors",
+>   "credentials": "include"
+> });
+> ```
+> 
+> **Líneas de auditoría técnica planificadas:**
+> 1. **Inspección de Respuesta HTTP Real:** Revisar el código de estatus HTTP (400, 403, 409, 422, 500) y decodificar el payload JSON de error devuelto por Santander (`errorCode`, `message`, `errorDescription`, `incidentId`).
+> 2. **Pre-requisitos de la Máquina de Estados (`obu/case`):** Determinar qué eventos o tokens previos faltan antes de poder formalizar:
+>    - Validación de enrolamiento biométrico facial / FAD.
+>    - Aceptación previa o descarga de carátula de contrato.
+>    - Estado interno del expediente en `obu/case` (`registrada` -> `evaluada` -> `formalizada`).
+> 3. **Headers, Tokens y Anti-CSRF:**
+>    - Validar si el endpoint exige token de cabecera (`x-xsrf-token`, `x-request-id`, o header de sesión obtenido en la pantalla previa).
+>    - Confirmar si la cookie de sesión (`JSESSIONID`, `AWSALB`, o similar) se mantiene activa con `credentials: "include"`.
+> 4. **Restricciones del Core Bancario (Partenón/BNC):**
+>    - Si el lead ya cuenta con un contrato previo activo o no liquidado que bloquee la apertura digital N2.
+>    - Discrepancias entre CURP/RFC consultado y registros históricos.
 
 ---
 
-## 🎯 Prioridades Críticas (Próxima Sesión)
+## 🎯 Siguientes Tareas en Cola
 
 1. **Dashboard Operativo - Métricas de Impacto (Zero-Bloat)**:
-   - Panel superior colapsable con distribución geográfica por Estado (Top 10 estados con mayor límite y densidad de tarjetas).
-   - Indicador de cobertura real de CURP (Calculadas vs Existentes vs Faltantes por motivo).
-   - Filtros rápidos de rango de crédito (ej: `> $500,000`, `> $1,000,000`, `> $2,000,000`).
-
-2. **Cálculo y Enriquecimiento Asíncrono de CURP**:
-   - Botón de disparo en segundo plano para procesar lotes residuales de registros incompletos.
-   - Detección de homoclaves y validación con dígito verificador RENAPO.
-
+   - Panel superior colapsable con distribución geográfica por Estado.
+   - Indicador de cobertura real de CURP.
+2. **Cálculo y Enriquecimiento Asíncrono de CURP residual**.
 3. **Seguridad y Control de Acceso**:
    - Rate limiting en endpoint de login `/api/auth/login`.
    - Rotación de cookies de sesión firmadas con `SECRET_KEY`.
-
-4. **Integración con Ecosistema Tríada (Ruthopia / BetMexico)**:
-   - Exportador rápido filtrado hacia `data/vault_cards.db` para alimentar checkers.
