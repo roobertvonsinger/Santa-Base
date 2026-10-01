@@ -300,16 +300,16 @@ def _check_curp_sync(
     curp: str,
     proxy: Optional[Dict[str, str]] = None,
     state: str = "NUEVO LEON",
-    lat: str = "25.748",
-    lon: str = "-100.285"
+    lat: Optional[str] = None,
+    lon: Optional[str] = None
 ) -> Dict[str, Any]:
-    for attempt in range(2):
+    for attempt in range(3):
         p = proxy if (proxy and attempt == 0) else get_default_residential_proxy()
         res = _execute_attempt(curp, proxy=p, state=state, lat=lat, lon=lon)
         if res.get("status") in ("ON", "OFF"):
             return res
-        if attempt == 0 and "Excepción red" in str(res.get("detail", "")):
-            time.sleep(0.5)
+        if attempt < 2 and "Excepción red" in str(res.get("detail", "")):
+            time.sleep(0.3)
             continue
         return res
     return res
@@ -319,8 +319,8 @@ async def check_single_curp(
     curp: str,
     proxy: Optional[dict] = None,
     state: str = "NUEVO LEON",
-    lat: str = "25.748",
-    lon: str = "-100.285"
+    lat: Optional[str] = None,
+    lon: Optional[str] = None
 ) -> dict:
     """Verifica un CURP vía pipeline HTTP directo (Chrome 120 TLS) en ~5-7 segundos sin navegadores."""
     return await asyncio.to_thread(_check_curp_sync, curp, proxy=proxy, state=state, lat=lat, lon=lon)
