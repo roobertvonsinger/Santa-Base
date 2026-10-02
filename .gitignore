@@ -59,3 +59,8 @@ tests/*.png
 .DS_Store
 Thumbs.db
 scratch_*
+
+# Runtime logs & locks (server local)
+_uvicorn*.log
+_uvicorn*.err
+*.lock

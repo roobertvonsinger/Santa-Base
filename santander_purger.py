@@ -183,11 +183,11 @@ class SqliteBatchWriter:
                 u6licrea TEXT,
                 fecha_nacimiento TEXT,
                 genero TEXT,
-                telefono TEXT,
                 direccion TEXT,
-                work_status TEXT DEFAULT 'NUEVO',
+                work_status TEXT DEFAULT 'ACTIVE',
                 operador TEXT,
                 notas TEXT,
+                card_verified INTEGER DEFAULT 0,
                 checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -229,28 +229,22 @@ class SqliteBatchWriter:
                 try:
                     conn.execute("UPDATE santander_records SET results = ? WHERE id = ?", (item["result"], rid))
                     
-                    tel = rec.get("telefono")
-                    if not tel:
-                        lad = rec.get("u6ladte1") or ""
-                        num = rec.get("u6tel1") or ""
-                        tel = f"{lad} {num}".strip()
-                        
                     dir_str = rec.get("direccion")
                     if not dir_str:
                         a1 = rec.get("dmaddr1") or ""
                         a2 = rec.get("dmaddr2") or ""
                         dir_str = f"{a1} {a2}".strip()
-                        
+
                     # INSERT OR IGNORE (no OR REPLACE): si el id/curp ya existe en santander_hits porque un
                     # operador ya lo trabajó (work_status/operador/notas asignados), NO se pisa. OR REPLACE
-                    # borraba la fila vieja y la reinsertaba con work_status='NUEVO', perdiendo ese trabajo
+                    # borraba la fila vieja y la reinsertaba con work_status='ACTIVE', perdiendo ese trabajo
                     # en cualquier carrera entre el purger y la edición manual del mismo id.
                     conn.execute("""
                         INSERT OR IGNORE INTO santander_hits (
                             id, u6acct, curp, u6rfc, dmname, estado, ciudad, codigo_postal,
-                            u6licrea, fecha_nacimiento, genero, telefono, direccion,
-                            work_status, checked_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NUEVO', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            u6licrea, fecha_nacimiento, genero, direccion,
+                            work_status, card_verified, checked_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     """, (
                         rid,
                         rec.get("u6acct"),
@@ -263,7 +257,6 @@ class SqliteBatchWriter:
                         rec.get("u6licrea"),
                         rec.get("fecha_nacimiento"),
                         rec.get("genero"),
-                        tel,
                         dir_str
                     ))
                     conn.commit()
@@ -362,17 +355,41 @@ class SegmentedPurgerDaemon:
         }
 
     def _count_unworked_hits(self) -> int:
-        """Cuenta hits en santander_hits con work_status='NUEVO' (el pool real que ven los operadores,
-        sin contar los que ya estan EN_PROCESO/CERRADO/etc). Si la tabla aun no existe, cuenta 0."""
+        """Cuenta hits en santander_hits con work_status='ACTIVE' (el pool real que ven los operadores,
+        sin contar los que ya estan SUCCESS/OFF). Si la tabla aun no existe, cuenta 0."""
         try:
             conn = sqlite3.connect(self.db_path, timeout=15.0)
             try:
-                cur = conn.execute("SELECT COUNT(*) FROM santander_hits WHERE work_status = 'NUEVO'")
+                cur = conn.execute("SELECT COUNT(*) FROM santander_hits WHERE work_status = 'ACTIVE'")
                 return cur.fetchone()[0]
             finally:
                 conn.close()
         except Exception:
             return 0
+
+    def _migrate_existing_hits(self):
+        """Migración única: hits con work_status viejo (NUEVO/EN_GESTION/CERRADO/DESCARTADO)
+        se normalizan a ACTIVE. Los que ya tienen card_verified=1 no se tocan."""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=15.0)
+            try:
+                # Verificar si la columna card_verified existe
+                cols = [r[1] for r in conn.execute("PRAGMA table_info(santander_hits)").fetchall()]
+                if "card_verified" not in cols:
+                    conn.execute("ALTER TABLE santander_hits ADD COLUMN card_verified INTEGER DEFAULT 0")
+                    conn.commit()
+                # Migrar statuses viejos a ACTIVE
+                conn.execute("""
+                    UPDATE santander_hits SET work_status = 'ACTIVE'
+                    WHERE work_status IN ('NUEVO', 'EN_GESTION', 'CERRADO', 'DESCARTADO')
+                """)
+                migrated = conn.total_changes
+                conn.commit()
+                print(f"[✓] Migración completada: hits normalizados a ACTIVE")
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"[!] Error en migración: {e}")
 
     def _write_status_file(self, extra: Optional[Dict[str, Any]] = None):
         """Emite telemetría viva a purger_status.json."""
@@ -391,6 +408,7 @@ class SegmentedPurgerDaemon:
             pass
 
     async def run(self):
+        self._migrate_existing_hits()
         self.writer.start()
         print(f"[*] SantaPurger iniciado | BD: {self.db_path} | Workers: {self.workers}")
         if self.estados:
@@ -405,7 +423,7 @@ class SegmentedPurgerDaemon:
         # agotar el segmento (COMPLETED).
         consecutive_cycle_errors = 0
         while self.running:
-            # Control de cuota: si ya hay suficiente inventario de hits sin trabajar (work_status='NUEVO'),
+            # Control de cuota: si ya hay suficiente inventario de hits sin trabajar (work_status='ACTIVE'),
             # pausar el gasto de proxy/CPU en vez de seguir acumulando mas de los que los operadores pueden
             # atender. Histeresis (pausa en hits_pool_max, retoma en hits_pool_resume) evita prender/apagar
             # el purger en cada re-chequeo cuando el conteo ronda el umbral.
@@ -660,7 +678,7 @@ def main():
     parser.add_argument("--burst-min", type=float, default=3.5, help="Duración de la ráfaga activa en minutos")
     parser.add_argument("--cooldown-min", type=float, default=1.5, help="Duración del enfriamiento en minutos")
     parser.add_argument("--daemon", action="store_true", help="Modo continuo desatendido (repite ráfagas indefinidamente)")
-    parser.add_argument("--hits-pool-max", type=int, default=200, help="Pausa el purger si hay >= esto de hits work_status=NUEVO sin trabajar (no quema cuota de proxy de más)")
+    parser.add_argument("--hits-pool-max", type=int, default=200, help="Pausa el purger si hay >= esto de hits work_status=ACTIVE sin trabajar (no quema cuota de proxy de más)")
     parser.add_argument("--hits-pool-resume", type=int, default=100, help="Retoma solo cuando el pool de hits sin trabajar baja a esto o menos")
     parser.add_argument("--pause-check-min", type=float, default=10.0, help="Cada cuánto re-checa el pool mientras está pausado (minutos)")
     parser.add_argument("--status", action="store_true", help="Consulta el estado actual de purger_status.json y sale")

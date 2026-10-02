@@ -24,23 +24,23 @@
 
 ---
 
-## 🔧 Bitácora de Sesión 2026-09-30 — Estado de Componentes
+## 🔧 Bitácora de Sesión 2026-10-02 — Estado de Componentes
 
-1. **Bóveda HITS y Visor Simplificado (`app.py`):**
-   - Sustitución de los dos botones redundantes por un único botón `🚀 Trabajar` en columna dedicada.
-   - Cabeceras de `hits-table` interactivas y ordenables (`toggleHitsSort`, indicadores `▲`/`▼`) por estatus, tarjeta, curp, nombre, crédito, estado, ciudad, cp, operador y fecha.
-   - Búsqueda en HITS expandida para indexar `codigo_postal`, `ciudad` y `u6acct`.
-   - Control de concurrencia en `/api/hits/{id}/claim`: auto-cierre del lead anterior del operador (`CERRADO` con nota de auditoría) si abre otro. Superadmin (`Robertvs`) 100% exento.
-   - Transmisión de parámetros completos (`curp`, `estado`, `cp`, `ciudad`, `name`, `user`, `role`) vía protocolo `santabase-stealth://`.
-2. **Navegador de Operador (`scripts/stealth_browser/launch_mobile_browser.py`):**
-   - Mapeo de prefijos postales mexicanos `CP_PREFIX_TO_ESTADO` y resolución de coordenadas GPS exactas por CP o Estado.
-   - Ficha visual de datos del lead al arrancar con conexión directa local por default (sin ventana confusa de proxies).
-   - Control estricto de instancia única por operador vía `PID_LOCK_FILE` y `taskkill` de procesos huérfanos. Superadmin exento.
-3. **Purger Automático y Regla de Edad (`santander_purger.py`):**
-   - Corrección del umbral de nacimiento a `1963-01-01` (excluye 1962 y anteriores) en código y en servicio `/etc/systemd/system/santander-purger.service` en Karen VPS KVM4.
-   - Depuración de BD: 18 hits `<= 1962` actualizados a `DESCARTADO`. 91 hits `NUEVO` activos en la bóveda ($\ge 1963$).
-4. **Verificación Automatizada:**
-   - 52/52 pruebas en verde (`pytest tests/`).
+1. **Bóveda HITS como tabla operable (`app.py`):**
+   - `work_status` reducido a tres estados: `ACTIVE` (sin trabajar), `SUCCESS` (trabajado con éxito) y `OFF` (descartado).
+   - `OFF` **borra** el hit de `santander_hits` y devuelve el lead a la base con `results = 'OFF: descartado por operador (...)'` anclado por `curp`. No se nullea `results` a propósito: el purger solo selecta `results IS NULL`, así que nullear re-encolaría y re-quemaría el mismo lead.
+   - `SUCCESS` se queda en la bóveda pero con pestaña propia, separado de `ACTIVE` para que no se mezclen trabajados y sin trabajar.
+   - Columnas `accion` y `telefono` **eliminadas** (13 columnas en total). Se fue también el navegador de operador (`scripts/stealth_browser/`) y el protocolo `santabase-stealth://` asociado — ya no era necesario.
+   - UI: tabs `all / active / success / off`, colores por estado, confirm() antes de tirar un registro a la basura.
+2. **Filtro de tarjeta obligatorio (`santander_purger.py`):**
+   - Ningún hit entra a la bóveda sin pasar `check_card_existence()` contra el login web de Santander. `ACTIVE` → bóveda; `INACTIVE` → el lead nunca se quema; `ERROR` (red/proxy) → tampoco, se reintenta después.
+   - `card_verified`added a la tabla; migración idempotente en `scripts/migrate_hits_schema.py`.
+3. **Verificador retroactivo (`scripts/verify_existing_hits.py`):**
+   - Pasa el mismo filtro a los hits que ya estaban en la bóveda. `INACTIVE` → borra el hit y marca el registro base como `OFF: tarjeta inactiva (...)`.
+   - Concurrencia: workers asyncio (default 4) con cola compartida — cada item se entrega a un solo worker. Entre corridas distintas, `SingleInstanceLock` con PID liveness + reclamo de lock obsoleto evita el doble gasto de proxy sobre las mismas tarjetas.
+4. **Purger Automático y Regla de Edad (`santander_purger.py`):**
+   - Umbral de nacimiento `1963-01-01` (excluye 1962 y anteriores) en código y en `santander-purger.service` en Karen VPS KVM4.
+5. **Estado verificado de la BD al cierre:** 135 hits, 5 con `card_verified=1`, 130 pendientes de verificar.
 
 ---
 

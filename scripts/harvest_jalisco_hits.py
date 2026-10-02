@@ -169,9 +169,9 @@ async def harvest(target_hits: int = 100, max_checks: int = 2000, delay_sec: flo
                 cur.execute("""
                     INSERT OR REPLACE INTO santander_hits (
                         id, u6acct, curp, u6rfc, dmname, estado, ciudad, codigo_postal,
-                        u6licrea, fecha_nacimiento, genero, telefono, direccion, work_status, checked_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NUEVO', CURRENT_TIMESTAMP)
-                """, (rid, acct, curp_val, rfc, name, "JALISCO", city, cp, limit_raw, fnac, gender, tel, addr))
+                        u6licrea, fecha_nacimiento, genero, direccion, work_status, card_verified, checked_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 1, CURRENT_TIMESTAMP)
+                """, (rid, acct, curp_val, rfc, name, "JALISCO", city, cp, limit_raw, fnac, gender, addr))
                 conn.commit()
                 print(f"[HIT #{hits_found}] Elegible! Guardado en bóveda ({dur:.1f}s)")
             except Exception as e:
