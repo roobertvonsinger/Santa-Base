@@ -83,16 +83,25 @@ def check_one(card, browser):
     t0 = time.time()
     try:
         page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(7000)
+        time.sleep(7.0)
 
         campo = page.locator("#buc-input").first
         campo.wait_for(state="visible", timeout=15000)
         campo.click()
         campo.fill("")
         campo.type(card, delay=55)
-        page.wait_for_timeout(800)
+        time.sleep(0.8)
         campo.press("Enter")
-        page.wait_for_timeout(12000)
+
+        # Esperar la respuesta de auth/login (o assert) sin depender de page.wait_for_timeout
+        for _ in range(28):
+            time.sleep(0.5)
+            if "login" in visto:
+                break
+            if "assert" in visto and visto["assert"] is not None:
+                time.sleep(1.0)
+                if "login" in visto:
+                    break
 
         d = ((visto.get("assert") or {}).get("data") or {})
         state = d.get("state", "")
@@ -117,7 +126,27 @@ def check_one(card, browser):
     except Exception as ex:
         return ("ERROR", "", f"{str(ex).splitlines()[0][:60]} ({round(time.time()-t0,1)}s)")
     finally:
-        ctx.close()
+        try:
+            ctx.close()
+        except Exception:
+            pass
+
+
+def _get_browser(p, current_browser=None):
+    if current_browser is not None:
+        try:
+            if current_browser.is_connected():
+                return current_browser
+        except Exception:
+            pass
+        try:
+            current_browser.close()
+        except Exception:
+            pass
+    return p.chromium.launch(
+        headless=False,
+        args=["--window-position=1900,0", "--window-size=1000,800"],
+    )
 
 
 def main():
@@ -134,16 +163,14 @@ def main():
     errors = 0
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=["--window-position=1900,0", "--window-size=1000,800"],
-        )
+        browser = _get_browser(p)
         for i, rec in enumerate(cards):
             raw_card = str(rec.get("card") or "")
             card = "".join(c for c in raw_card if c.isdigit())[:16]
             if len(card) < 16:
                 estado, uid, det = "INACTIVE", "", "tarjeta invalida / incompleta"
             else:
+                browser = _get_browser(p, browser)
                 estado, uid, det = check_one(card, browser)
 
             tag = "OK" if estado == "ACTIVE" else ("NO" if estado == "INACTIVE" else "?")
