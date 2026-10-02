@@ -322,9 +322,11 @@ class SegmentedPurgerDaemon:
         burst_sec: float = 210.0,    # 3.5 minutos
         cooldown_sec: float = 90.0,   # 1.5 minutos
         daemon_mode: bool = False,
-        hits_pool_max: int = 200,      # pausa el gasto de proxies si hay >= esto de hits sin trabajar
-        hits_pool_resume: int = 100,   # solo retoma cuando el pool baja a esto o menos (histeresis anti-flip-flop)
-        pause_check_sec: float = 600.0  # cada cuanto re-checa el pool mientras esta pausado (10 min)
+        hits_pool_max: int = 12,       # pausa el gasto de proxies si hay >= esto de hits sin trabajar
+        hits_pool_resume: int = 10,    # retoma cuando el pool baja a esto o menos (histeresis: nunca
+                                       # baja de 10 hits disponibles; si los operadores los mueven a
+                                       # SUCCESS/OFF, un hit abre el hueco y el ciclo reactiva el chequeo)
+        pause_check_sec: float = 60.0  # cada cuanto re-checa el pool mientras esta pausado
     ):
         self.db_path = db_path
         self.estado = estado
@@ -678,9 +680,9 @@ def main():
     parser.add_argument("--burst-min", type=float, default=3.5, help="Duración de la ráfaga activa en minutos")
     parser.add_argument("--cooldown-min", type=float, default=1.5, help="Duración del enfriamiento en minutos")
     parser.add_argument("--daemon", action="store_true", help="Modo continuo desatendido (repite ráfagas indefinidamente)")
-    parser.add_argument("--hits-pool-max", type=int, default=200, help="Pausa el purger si hay >= esto de hits work_status=ACTIVE sin trabajar (no quema cuota de proxy de más)")
-    parser.add_argument("--hits-pool-resume", type=int, default=100, help="Retoma solo cuando el pool de hits sin trabajar baja a esto o menos")
-    parser.add_argument("--pause-check-min", type=float, default=10.0, help="Cada cuánto re-checa el pool mientras está pausado (minutos)")
+    parser.add_argument("--hits-pool-max", type=int, default=12, help="Pausa el purger si hay >= esto de hits work_status=ACTIVE sin trabajar (no quema cuota de proxy de más)")
+    parser.add_argument("--hits-pool-resume", type=int, default=10, help="Retoma solo cuando el pool de hits sin trabajar baja a esto o menos")
+    parser.add_argument("--pause-check-min", type=float, default=1.0, help="Cada cuánto re-checa el pool mientras está pausado (minutos)")
     parser.add_argument("--status", action="store_true", help="Consulta el estado actual de purger_status.json y sale")
     
     args = parser.parse_args()
