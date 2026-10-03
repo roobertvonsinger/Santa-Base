@@ -17,6 +17,7 @@ import os
 import json
 import re
 import random
+import threading
 from curl_cffi import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -384,7 +385,8 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 _WEB_MIN_INTERVAL_SEC = 4.0     # minimo entre dos tarjetas contra santanderweb
 _WEB_LAUNCH_ARGS = ["--window-position=1900,0", "--window-size=900,700"]
 
-_browser_singleton = {"pw": None, "browser": None, "last_call": 0.0}
+_browser_singleton = {"pw": None, "browser": None, "last_call": 0.0,
+                      "owner_tx": None, "owner_thread": None, "owner_ready": None}
 _web_lock = None
 
 
@@ -393,40 +395,110 @@ def _get_web_lock():
     todos los workers del purger contra la misma ventana de Chromium."""
     global _web_lock
     if _web_lock is None:
-        import threading
         _web_lock = threading.Lock()
     return _web_lock
 
 
+def _get_browser_tx():
+    """Devuelve el Executor de UN SOLO hilo dueno del Browser.
+
+    BUG MEDIDO (2026-10-02): el lock serializaba las llamadas, pero el `Browser`
+    es un singleton creado por el primer hilo que lo adquiere. Playwright ata el
+    objeto al hilo que lo creo y lanza "Cannot switch to a different thread"
+    cuando otro lo toca -- el lock NO alcanza, hay que fijar el HILO.
+
+    Efecto real medido: con `--workers 2`, 4 tarjetas de 24 se perdieron con
+    ese error, y las mismas filas al reintentarse si pasaban. El daemon corre
+    con workers=5, o sea la mayoria de las tarjetas con tarjeta se perdian.
+
+    Aqui todo el trabajo de Playwright se encola a un hilo dedicado y
+    permanente. El hilo se identifica a SI MISMO al arrancar (no lo identifica
+    el llamador, que seria el bug de nuevo) y expone `_run_in_owner(fn)`, que
+    detecta si ya estamos dentro para no hacer submit-y-esperarse-a-si-mismo.
+    """
+    st = _browser_singleton
+    if st["owner_tx"] is None:
+        import concurrent.futures
+        st["owner_ready"] = threading.Event()
+        st["owner_tx"] = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="pw-owner"
+        )
+        # El primer submit arranca el hilo dueno; esa tarea solo se registra.
+        st["owner_tx"].submit(_claim_owner_thread)
+        st["owner_ready"].wait(timeout=10)
+    return st["owner_tx"]
+
+
+def _claim_owner_thread():
+    """Corre DENTRO del hilo dueno y guarda su identidad. Una sola vez."""
+    _browser_singleton["owner_thread"] = threading.current_thread()
+    _browser_singleton["owner_ready"].set()
+
+
+def _run_in_owner(fn):
+    """Ejecuta fn en el hilo dueno del navegador y devuelve su resultado.
+
+    Si el llamador YA es el hilo dueno, ejecuta directo: un submit() ahi se
+    quedaria esperando a si mismo para siempre (deadlock medido: la prueba de
+    hilos se colgaba al primer submit anidado de _acquire_web_browser).
+    """
+    tx = _get_browser_tx()
+    if threading.current_thread() is _browser_singleton["owner_thread"]:
+        return fn()
+    return tx.submit(fn).result()
+
+
 def _acquire_web_browser():
     """Devuelve un Chromium vivo y reutilizable, relanzandolo solo si murio.
-    Reutilizarlo es lo que elimina los 3.54s de startup medidos por llamada."""
-    from playwright.sync_api import sync_playwright
+    Reutilizarlo es lo que elimina los 3.54s de startup medidos por llamada.
 
-    st = _browser_singleton
-    if st["pw"] is None:
-        st["pw"] = sync_playwright().start()
-    if st["browser"] is None or not st["browser"].is_connected():
-        st["browser"] = st["pw"].chromium.launch(headless=False, args=_WEB_LAUNCH_ARGS)
-    return st["browser"]
+    Todo esto -- `sync_playwright().start()` y `chromium.launch()` -- se ejecuta
+    SIEMPRE en el hilo dueno. Lanzado en el hilo de un worker, el Browser
+    quedaria atado a ese hilo y la siguiente llamada reventaria.
+    """
+    def _launch():
+        from playwright.sync_api import sync_playwright
+
+        st = _browser_singleton
+        if st["pw"] is None:
+            st["pw"] = sync_playwright().start()
+        if st["browser"] is None or not st["browser"].is_connected():
+            st["browser"] = st["pw"].chromium.launch(headless=False,
+                                                     args=_WEB_LAUNCH_ARGS)
+        return st["browser"]
+
+    return _run_in_owner(_launch)
 
 
 def _close_web_browser():
     """Cierra y libera el Chromium compartido. Llamar solo al apagar el daemon:
     cada check crea/destruye contextos, pero el proceso de navegador se queda vivo."""
-    st = _browser_singleton
+    def _shutdown():
+        st = _browser_singleton
+        try:
+            if st["browser"] is not None:
+                st["browser"].close()
+        except Exception:
+            pass
+        try:
+            if st["pw"] is not None:
+                st["pw"].stop()
+        except Exception:
+            pass
+        st["pw"] = None
+        st["browser"] = None
+
+    tx = _browser_singleton["owner_tx"]
+    if tx is None:
+        return
     try:
-        if st["browser"] is not None:
-            st["browser"].close()
+        _run_in_owner(_shutdown)
     except Exception:
         pass
-    try:
-        if st["pw"] is not None:
-            st["pw"].stop()
-    except Exception:
-        pass
-    st["pw"] = None
-    st["browser"] = None
+    tx.shutdown(wait=False)
+    _browser_singleton["owner_tx"] = None
+    _browser_singleton["owner_thread"] = None
+    _browser_singleton["owner_ready"] = None
 
 
 def _throttle_web():
@@ -477,10 +549,18 @@ def check_card_existence(
 
     resultado = {"status": "ERROR", "detail": "fallo interno", "time": round(time.time() - t0, 1)}
     try:
-        with _get_web_lock():
-            _throttle_web()
-            browser = _acquire_web_browser()
-            resultado = _run_flow(browser, card_16)
+        # El flujo completo (throttle + browser + navegacion) va al hilo dueno.
+        # Hacerlo aqui, en el hilo del worker, es lo que tiraba las tarjetas
+        # con "Cannot switch to a different thread". El Executor de 1 worker
+        # serializa por su cuenta; el lock extra se queda como red de seguridad
+        # para el `last_call` del throttle.
+        def _todo():
+            with _get_web_lock():
+                _throttle_web()
+                browser = _acquire_web_browser()
+                return _run_flow(browser, card_16)
+
+        resultado = _run_in_owner(_todo)
     except Exception as ex:
         return {"status": "ERROR", "detail": f"navegador: {str(ex).splitlines()[0][:70]}", "time": round(time.time() - t0, 1)}
 

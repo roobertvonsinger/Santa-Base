@@ -26,16 +26,53 @@ import urllib.error
 from typing import Optional, Dict, Any, Tuple, List
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
-DEFAULT_DB_PATH = "/opt/kvm4/apps/santander/data/santander.db"
-if not os.path.exists(DEFAULT_DB_PATH):
-    # Fallback local para desarrollo/tests
-    local_db = os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "santander.db"))
-    if os.path.exists(local_db):
-        DEFAULT_DB_PATH = local_db
-    else:
-        dev_db = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "santander.db"))
-        if os.path.exists(dev_db):
-            DEFAULT_DB_PATH = dev_db
+# La consola de Windows es cp1252 y el ciclo imprime flechas/emoji (✓, 💥).
+# Sin esto, print() lanza UnicodeEncodeError DENTRO del ciclo, el except lo
+# captura como "CYCLE ERROR", reintenta 5 veces y se rinde -- medido el
+# 2026-10-02, el purger no procesaba ni un registro en local. Es un fallo de
+# arranque, no de logica: se arregla aqui y no con PYTHONIOENCODING en el
+# comando, para que el daemon de la VPS tampoco dependa de como se invoque.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass  # stream sin reconfigure (jupyter/pipe raro): no es bloqueante
+
+def _resolve_db_path() -> str:
+    """Elige la BD real, priorizando la que TIENE filas.
+
+    El orden anterior probaba `data/santander.db` del repo antes que el
+    `../../data/` de la BD de trabajo. En local eso resolvia a un archivo de
+    41 KB con la tabla VACIA (medido 2026-10-02: 0 candidatos, purger
+    "Sesion finalizada | Total procesados: 0"), mientras la BD buena --
+    4,891,788 filas, 1,472,971 con CURP -- quedaba dos niveles mas arriba y
+    nunca se miraba. Ahora se elige por contenido: la primera ruta que exista
+    Y tenga filas en santander_records; si ninguna, la primera que exista.
+    """
+    repo = os.path.dirname(os.path.abspath(__file__))
+    candidatas = [
+        "/opt/kvm4/apps/santander/data/santander.db",
+        os.path.join(repo, "data", "santander.db"),
+        os.path.abspath(os.path.join(repo, "..", "..", "data", "santander.db")),
+    ]
+    import sqlite3 as _sq
+    primera_existente = None
+    for ruta in candidatas:
+        if not os.path.exists(ruta):
+            continue
+        if primera_existente is None:
+            primera_existente = ruta
+        try:
+            c = _sq.connect("file:%s?mode=ro" % ruta.replace("\\", "/"), uri=True).cursor()
+            n = c.execute("SELECT COUNT(*) FROM santander_records").fetchone()[0]
+            if n:
+                return ruta
+        except Exception:
+            continue  # no es una BD nuestra (permisos, corrupta, otro schema)
+    return primera_existente or candidatas[0]
+
+
+DEFAULT_DB_PATH = _resolve_db_path()
 
 PROXY_GATE_URL = "http://127.0.0.1:8888/proxy"
 # El status JSON vive siempre junto a la BD activa (mismo directorio que DEFAULT_DB_PATH ya resolvió),
