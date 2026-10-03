@@ -94,22 +94,34 @@ def _execute_attempt(
     proxy: Optional[Dict[str, str]] = None,
     state: str = "NUEVO LEON",
     lat: Optional[str] = None,
-    lon: Optional[str] = None
+    lon: Optional[str] = None,
+    use_proxy: bool = True
 ) -> Dict[str, Any]:
+    """`use_proxy=False` corre directo desde la IP de la maquina.
+
+    Antes era imposible quitar el proxy: `_execute_attempt` hacia
+    `if proxy is None: proxy = get_default_residential_proxy()`, o sea que
+    `proxy=None` significaba "no me diste proxy, te consigo uno". Con las dos
+    fuentes caidas eso devolvia 'CONNECT tunnel failed' y hacia creer que no
+    habia salida sin proxy.
+    """
     t0 = time.time()
-    if proxy is None:
+    if proxy is None and use_proxy:
         proxy = get_default_residential_proxy()
 
     if not lat or not lon:
         lat, lon = get_coords_for_state(state)
 
-    srv = proxy.get("server", "").replace("http://", "").replace("https://", "")
-    usr = proxy.get("username", "")
-    pwd = proxy.get("password", "")
+    srv = (proxy or {}).get("server", "").replace("http://", "").replace("https://", "")
+    usr = (proxy or {}).get("username", "")
+    pwd = (proxy or {}).get("password", "")
     if usr and pwd:
         proxy_url = f"http://{usr}:{pwd}@{srv}"
-    else:
+    elif srv:
         proxy_url = f"http://{srv}"
+    else:
+        # Sin proxy: curl_cffi usa la conexion directa de la maquina.
+        proxy_url = ""
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
@@ -120,8 +132,14 @@ def _execute_attempt(
         "Content-Type": "application/json"
     }
 
-    proxies = {"http": proxy_url, "https": proxy_url}
-    session = requests.Session(impersonate="chrome120", proxies=proxies)
+    # Con proxy_url vacio NO se pasa `proxies`: curl_cffi interpreta
+    # {"http": "", ...} como un proxy mal formado y falla. Sin el kwarg usa la
+    # conexion directa de la maquina.
+    if proxy_url:
+        session = requests.Session(impersonate="chrome120",
+                                   proxies={"http": proxy_url, "https": proxy_url})
+    else:
+        session = requests.Session(impersonate="chrome120")
 
     try:
         # Paso 1: Inicializar sesión en onboarding
@@ -307,11 +325,25 @@ def _check_curp_sync(
     proxy: Optional[Dict[str, str]] = None,
     state: str = "NUEVO LEON",
     lat: Optional[str] = None,
-    lon: Optional[str] = None
+    lon: Optional[str] = None,
+    use_proxy: bool = True
 ) -> Dict[str, Any]:
+    """`use_proxy=False` corre DIRECTO, desde la IP de la maquina.
+
+    Antes esto era imposible: la linea de abajo hacia
+    `proxy if (proxy and attempt == 0) else get_default_residential_proxy()`,
+    asi que pasar proxy=None NO quitaba el proxy -- lo reponia. Medido: con las
+    dos fuentes de proxy caidas (proxy001 responde 403/431 y el proxy-gate vive
+    en una VPS inaccesible), pedir `proxy=None` devolvia el mismo
+    'CONNECT tunnel failed' y parecia que no habia salida sin proxy.
+    """
     for attempt in range(3):
-        p = proxy if (proxy and attempt == 0) else get_default_residential_proxy()
-        res = _execute_attempt(curp, proxy=p, state=state, lat=lat, lon=lon)
+        if not use_proxy:
+            p = None
+        else:
+            p = proxy if (proxy and attempt == 0) else get_default_residential_proxy()
+        res = _execute_attempt(curp, proxy=p, state=state, lat=lat, lon=lon,
+                               use_proxy=use_proxy)
         if res.get("status") in ("ON", "OFF"):
             return res
         if attempt < 2 and "Excepción red" in str(res.get("detail", "")):
@@ -326,10 +358,16 @@ async def check_single_curp(
     proxy: Optional[dict] = None,
     state: str = "NUEVO LEON",
     lat: Optional[str] = None,
-    lon: Optional[str] = None
+    lon: Optional[str] = None,
+    use_proxy: bool = True
 ) -> dict:
-    """Verifica un CURP vía pipeline HTTP directo (Chrome 120 TLS) en ~5-7 segundos sin navegadores."""
-    return await asyncio.to_thread(_check_curp_sync, curp, proxy=proxy, state=state, lat=lat, lon=lon)
+    """Verifica un CURP vía pipeline HTTP directo (Chrome 120 TLS) en ~5-7 segundos sin navegadores.
+
+    `use_proxy=False` = directo, sin proxy (ver nota en _check_curp_sync).
+    """
+    return await asyncio.to_thread(_check_curp_sync, curp, proxy=proxy,
+                                   state=state, lat=lat, lon=lon,
+                                   use_proxy=use_proxy)
 
 
 async def run_batch(curps: list[str], concurrency: int = 3) -> list[dict]:

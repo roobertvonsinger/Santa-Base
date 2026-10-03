@@ -74,6 +74,12 @@ def _resolve_db_path() -> str:
 
 DEFAULT_DB_PATH = _resolve_db_path()
 
+# Circuit breaker de infraestructura. Ver el uso en el worker_loop: si se
+# acumulan estos reintentos seguidos SIN un solo resultado real, la Red (proxy
+# caido, Santander bloqueando) esta caida y seguir gastando workers no sirve.
+# Medido: 9,611 reintentos en una hora con el proxy muerto, cero resultados.
+RETRY_CIRCUIT_LIMIT = 30
+
 PROXY_GATE_URL = "http://127.0.0.1:8888/proxy"
 # El status JSON vive siempre junto a la BD activa (mismo directorio que DEFAULT_DB_PATH ya resolvió),
 # nunca hardcodeado por separado — evita que purger y app.py apunten a rutas distintas en VPS.
@@ -341,10 +347,15 @@ class SqliteBatchWriter:
             self.thread.join(timeout=5.0)
 
 
-async def execute_curp_check(curp: str, proxy: Optional[Dict[str, str]] = None, state: Optional[str] = None) -> Dict[str, Any]:
-    """Ejecuta la función canónica de verificación HTTP con hard-timeout y protección."""
+async def execute_curp_check(curp: str, proxy: Optional[Dict[str, str]] = None,
+                              state: Optional[str] = None,
+                              use_proxy: bool = True) -> Dict[str, Any]:
+    """Ejecuta la función canónica de verificación HTTP con hard-timeout y protección.
+
+    `use_proxy=False` propaga hasta santander_runner para correr directo.
+    """
     try:
-        kwargs: Dict[str, Any] = {"proxy": proxy}
+        kwargs: Dict[str, Any] = {"proxy": proxy, "use_proxy": use_proxy}
         if state:
             kwargs["state"] = state
         res = await asyncio.wait_for(check_single_curp(curp, **kwargs), timeout=55.0)
@@ -376,9 +387,11 @@ class SegmentedPurgerDaemon:
         hits_pool_resume: int = 10,    # retoma cuando el pool baja a esto o menos (histeresis: nunca
                                        # baja de 10 hits disponibles; si los operadores los mueven a
                                        # SUCCESS/OFF, un hit abre el hueco y el ciclo reactiva el chequeo)
-        pause_check_sec: float = 60.0  # cada cuanto re-checa el pool mientras esta pausado
+        pause_check_sec: float = 60.0,  # cada cuanto re-checa el pool mientras esta pausado
+        use_proxy: bool = True          # False = directo desde la IP de la maquina
     ):
         self.db_path = db_path
+        self.use_proxy = use_proxy
         self.estado = estado
         self.estados = estados
         self.min_credito = min_credito
@@ -405,6 +418,9 @@ class SegmentedPurgerDaemon:
             "rate_per_min": 0.0,
             "active_workers": 0
         }
+        # Lo enciende el worker cuando los reintentos seguidos superan
+        # RETRY_CIRCUIT_LIMIT sin que haya un solo resultado real.
+        self._circuit_tripped = False
 
     def _count_unworked_hits(self) -> int:
         """Cuenta hits en santander_hits con work_status='ACTIVE' (el pool real que ven los operadores,
@@ -608,21 +624,30 @@ class SegmentedPurgerDaemon:
                 lim = rec["u6licrea"]
 
                 # Obtener proxy residencial fresco (ver santander_runner.get_default_residential_proxy)
-                try:
-                    proxy_dict = fetch_proxy_from_gate()
-                except Exception:
+                #
+                # Con --sin-proxy NO se pide ninguno: se corre directo desde la IP
+                # de la maquina. Hace falta porque proxy001 ahora rechaza la cuenta
+                # (403/431) y el proxy-gate vive en una VPS inaccesible.
+                if self.use_proxy:
+                    try:
+                        proxy_dict = fetch_proxy_from_gate()
+                    except Exception:
+                        proxy_dict = None
+                    if not proxy_dict:
+                        consecutive_proxy_errors += 1
+                        await asyncio.sleep(4.0)
+                        queue_records.put_nowait(r)
+                        queue_records.task_done()
+                        continue
+                else:
                     proxy_dict = None
-                if not proxy_dict:
-                    consecutive_proxy_errors += 1
-                    await asyncio.sleep(4.0)
-                    queue_records.put_nowait(r)
-                    queue_records.task_done()
-                    continue
 
                 consecutive_proxy_errors = max(0, consecutive_proxy_errors - 1)
 
                 # Ejecutar check canónico con proxy residencial
-                res = await execute_curp_check(curp, proxy=proxy_dict, state=rec.get("estado"))
+                res = await execute_curp_check(curp, proxy=proxy_dict,
+                                           state=rec.get("estado"),
+                                           use_proxy=self.use_proxy)
                 status = res.get("status")
                 detail = res.get("detail", "")
                 dur = res.get("time", 0)
@@ -661,6 +686,25 @@ class SegmentedPurgerDaemon:
                     # RETRY: No quemar lead, no escribir en BD
                     self.stats["retries"] += 1
                     print(f"  [⚠️ RETRY] ID:{rid} | {curp} | {detail}", flush=True)
+                    # CIRCUIT BREAKER.
+                    #
+                    # Antes: RETRY solo contaba y el ciclo seguia. Medido: con
+                    # el proxy caido (CONNECT tunnel failed) el daemon hizo
+                    # 9,611 reintentos seguidos en ~1 hora, cero resultados, y
+                    # el tramo >= $484k no avanzo NADA en ese tiempo. Cuatro
+                    # workers gastados en llamadas que no pueden funcionar.
+                    #
+                    # Ahora: N reintentos seguidos sin un solo resultado real
+                    # significa que la infraestructura esta caida, no que el
+                    # registro sea malo. Se para la rafaga y se aborta, para
+                    # que quien lo supervise lo vea en vez de quemarlo.
+                    if (self.stats["retries"] >= RETRY_CIRCUIT_LIMIT
+                            and self.stats["total_processed"] == 0):
+                        self._circuit_tripped = True
+                        print(f"  [🚫 CIRCUITO] {RETRY_CIRCUIT_LIMIT} reintentos "
+                              f"seguidos sin un solo resultado -> infraestructura "
+                              f"caida. Se aborta la rafaga.", flush=True)
+                        break
 
                 queue_records.task_done()
 
@@ -669,6 +713,10 @@ class SegmentedPurgerDaemon:
 
         # Monitor de progreso en ráfaga
         while any(not t.done() for t in tasks):
+            # El circuito se disparó: la infraestructura está caída. No tiene
+            # sentido seguir al monitor hasta que expire la ráfaga.
+            if self._circuit_tripped:
+                break
             elapsed = time.time() - t_burst_start
             remain = max(0.0, self.burst_sec - elapsed)
             if elapsed > 0:
@@ -686,6 +734,16 @@ class SegmentedPurgerDaemon:
         await asyncio.gather(*tasks, return_exceptions=True)
 
         # 3. Fase de Enfriamiento (Cooldown) y Limpieza de Huérfanos
+        if self._circuit_tripped:
+            # Infraestructura caída: volver False detiene el daemon. Sin esto
+            # entraba al cooldown y al siguiente ciclo repetía el bucle.
+            print("[🚫] Circuito abierto: se detiene el daemon para no "
+                  "quemar más cuota. Revisar el proxy antes de relanzar.",
+                  flush=True)
+            self.running = False
+            self._write_status_file({"state": "CIRCUIT_OPEN"})
+            return False
+
         if not self.daemon_mode and queue_records.empty():
             return False
 
@@ -734,6 +792,10 @@ def main():
     parser.add_argument("--hits-pool-resume", type=int, default=10, help="Retoma solo cuando el pool de hits sin trabajar baja a esto o menos")
     parser.add_argument("--pause-check-min", type=float, default=1.0, help="Cada cuánto re-checa el pool mientras está pausado (minutos)")
     parser.add_argument("--status", action="store_true", help="Consulta el estado actual de purger_status.json y sale")
+    parser.add_argument("--sin-proxy", dest="use_proxy", action="store_false",
+                        help="Corre DIRECTO desde la IP de esta maquina, sin proxy residencial. "
+                             "Hace falta cuando proxy001 rechaza la cuenta (403/431) o el proxy-gate "
+                             "esta caido. Riesgo: Santander puede bloquear esta IP.")
     
     args = parser.parse_args()
     
@@ -759,7 +821,8 @@ def main():
         daemon_mode=args.daemon,
         hits_pool_max=args.hits_pool_max,
         hits_pool_resume=args.hits_pool_resume,
-        pause_check_sec=args.pause_check_min * 60
+        pause_check_sec=args.pause_check_min * 60,
+        use_proxy=args.use_proxy
     )
     
     # Manejo de señales de parada limpia
