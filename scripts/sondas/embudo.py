@@ -63,11 +63,23 @@ for line in txt.splitlines():
     if "Elegible" in line:
         eleg += 1
 
-m = re.search(r"Total procesados: (\d+).*?HITS: (\d+).*?OFF: (\d+)", txt)
+# `re.search` solo devolvia el PRIMER resumen. Al concatenar varios lotes
+# (`cat a.log b.log > acum.log`) el encabezado quedaba mintiendo sobre el
+# total: mostraba 120 cuando el archivo tenia 270.
+# Se itera TODOS los resumenes y se suman.
+_rx = re.compile(r"Total procesados: (\d+).*?HITS: (\d+).*?OFF: (\d+)")
+_tot = _hit = _off = 0
+_sesiones = 0
+for m in _rx.finditer(txt):
+    _sesiones += 1
+    _tot += int(m.group(1))
+    _hit += int(m.group(2))
+    _off += int(m.group(3))
 print("Log: %s" % LOG)
-if m:
-    print("Total procesados: %s | HITS: %s | OFF: %s"
-          % (m.group(1), m.group(2), m.group(3)))
+if _sesiones:
+    print("Resumenes en el archivo: %d  ->  acumulado de todas las sesiones"
+          % _sesiones)
+    print("Total procesados: %d | HITS: %d | OFF: %d" % (_tot, _hit, _off))
 print()
 tot = sum(motivos.values()) or 1
 for k, v in motivos.most_common():
@@ -81,7 +93,7 @@ if hits:
 
 # tasa y proyeccion
 mh = motivos.get("HIT", 0)
-mp = int(m.group(1)) if m else tot
+mp = _tot or tot
 if mp:
     print()
     print("Tasa de hit: %d/%d = %.2f%%" % (mh, mp, 100.0 * mh / mp))
