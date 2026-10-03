@@ -59,6 +59,40 @@ Son dos cosas distintas y no se comparan:
 - **~29%** (en vivo, `scripts/renapo_controle.py`): CURPs calculadas que RENAPO
   acepta.
 
+### Por qué 96.50% es el techo: el `u6rfc` está roto en esas filas
+
+Los 25 fallos **son todos p0-p3** (las 4 iniciales). La causa no es el cálculo:
+el `u6rfc` de esas filas no coincide con su propia CURP.
+
+Medido, fila por fila (`scripts/sondas/diag_p03.py`):
+
+```
+p0 paterno    98.60%      p13 int.pat  100.00%
+p1 int.pat    98.46%      p14 int.mat  100.00%
+p2 materno    97.76%      p15 int.nom  100.00%
+p3 nombre     98.18%
+```
+
+`EDUARDO BARBA GARCIA DE ALBA`: `u6rfc=BAGE…`, CURP real=`GAAE…`, mi
+cálculo=`BAGE…` — o sea, copié el RFC, que es el que está mal. Lo mismo
+`ALEJANDRA LOMELI CARRILLO` (RFC `LOCX`, real `LOCA`) y
+`MARIA FERNANDA RUIZ GOMEZ` (RFC `RUGM`, real `RUGF`).
+
+Las iniciales **no se pueden recalcular del nombre**: medido
+(`scripts/sondas/iniciales_a_o_b.py`), sacarlas del nombre acierta **0/714**.
+No es que la regla esté mal implementada — el `dmname` está desordenado, con
+partículas `DE`/`DEL`/`LA` y apellidos compuestos (`GARCIA DE ALBA`,
+`VAN DYCK`, `MEADE ALTAMIRANO`) que rompen el corte de los dos apellidos. 7.40%
+del pool tiene partículas en el nombre.
+
+Conclusión: `rfc[0:4]` es la mejor fuente disponible y no hay dato mejor en la
+tabla. **96.50% es el techo, y es atribuible al `u6rfc`, no al cálculo.**
+
+> Nota sobre medición: `curp_medir_final.py` ahora compara 986,612 CURPs de las
+> cuales 985,899 las escribió el propio `curp_sync.py` — medirse contra su
+> propia salida infla el número. La cifra honesta son las **714 originales**
+> (`scripts/sondas/diag_particulas.py` reproduce ese corte).
+
 ### Por qué el en vivo es tan bajo: `OB-ORQ-05` no es "CURP mal"
 
 Prueba de control con 3 grupos, mismos pipeline:
@@ -80,12 +114,23 @@ cobertura del registro RENAPO, no calidad del cálculo.
 `scripts/curp_medir_final.py`, sobre 200,000 filas de 4.86M:
 
 ```
-CALCULABLES                        91.23%
-sexo_nombre_desconocido             8.57%
-rfc_enmascarado                     0.15%
-estado_desconocido                  0.05%
-digito verificador mal formado      0.00%
+                                    antes      ahora
+CALCULABLES                        91.23%    93.91%
+sexo_nombre_desconocido             8.57%     5.89%
+rfc_enmascarado                     0.15%     0.15%
+estado_desconocido                  0.05%     0.05%
+digito verificador mal formado      0.00%     0.00%
 ```
+
+El pool tiene **55,126 nombres dados distintos** y el léxico cubría 489. Los
+nombres se sacaron de la **frecuencia real del pool**
+(`scripts/sondas/lexicon_data.py`), no de memoria: 137/_FEM y 90/_MASC nuevos.
+
+Lo que **no** se hizo, por medición: tomar la clasificación automática desde la
+columna `genero`. Usa el mismo `_partes()` que se quería validar, así que se
+auto-contamina — salió `ASUNCION` en `_FEM` y en `_MASC`, y `DIAZ`, `GARCIA`,
+`HERNANDEZ` como masculinos. Queda a la vista en
+`scripts/sondas/lexicon_aplicar.py` para auditarlo.
 
 Un nombre no reconocido en el léxico **se descarta, no se adivina**: una CURP con
 el sexo inventado se rechaza igual en RENAPO y además quema una llamada.
