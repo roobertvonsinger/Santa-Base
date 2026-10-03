@@ -24,6 +24,34 @@ from curp_calc import calcular_curp, curp_valida  # noqa: E402
 DB = os.environ.get("SANTANDER_DB",
                     r'C:\Users\rober\Dropbox\TESTING DEV\data\santander.db')
 
+# CHECKPOINT DEL PUNTERO -- por que existe.
+#
+# El filtro era `curp IS NULL ... ORDER BY id LIMIT N`. Las filas que NO se
+# pueden calcular (RFC enmascarado, estado desconocido, nombre sin lexico)
+# siguen con `curp IS NULL` para siempre, asi que cada corrida las volvia a
+# leer y el puntero no avanzaba NUNCA. Medido: lote de 100,000 leidas ->
+# 3 escritas, y el id maximo con CURP se quedaba clavado.
+#
+# Ahora el puntero vive en un archivo y avanza con el, de modo que las filas
+# imposibles se intentan una sola vez. `--reset` lo pone en 0.
+PTR_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        ".curp_sync_puntaje")
+
+
+def leer_puntaje():
+    try:
+        with open(PTR_PATH) as f:
+            return int(f.read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def guardar_puntaje(valor):
+    tmp = PTR_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(str(int(valor)))
+    os.replace(tmp, PTR_PATH)
+
 
 def conectar():
     conn = sqlite3.connect(DB, timeout=60)
@@ -55,11 +83,31 @@ def main():
     ap.add_argument('--lotes', type=int, default=1, help='cuantos lotes followed')
     ap.add_argument('--status', action='store_true')
     ap.add_argument('--dry', action='store_true')
+    ap.add_argument('--reset', action='store_true',
+                    help='pone el puntaje en 0 (reintenta filas ya descartadas)')
+    ap.add_argument('--desde', type=int, default=None,
+                    help='arranca en este id y actualiza el puntaje')
     args = ap.parse_args()
 
     conn = conectar()
     print("ESTADO ACTUAL")
     estado(conn)
+    print("  puntaje del sync          : %d" % leer_puntaje())
+    if args.status or args.dry:
+        if args.dry:
+            pass
+        else:
+            conn.close()
+            return
+
+    if args.reset:
+        guardar_puntaje(0)
+        print("  puntaje reiniciado a 0")
+    if args.desde is not None:
+        guardar_puntaje(args.desde)
+        print("  puntaje fijado en %d" % args.desde)
+
+    puntaje = leer_puntaje()
     if args.status or args.dry:
         if args.dry:
             pass
@@ -69,14 +117,17 @@ def main():
 
     for n_lote in range(args.lotes):
         c = conn.cursor()
+        # `id > ?` es lo que hace avanzar el sync. Sin esto (ver la nota del
+        # PTR_PATH) el lote se releia entero en cada corrida.
         c.execute("""SELECT id, u6rfc, dmname, u6estado, genero FROM santander_records
                      WHERE (curp IS NULL OR TRIM(curp) = '')
                        AND results IS NULL
                        AND u6rfc IS NOT NULL AND LENGTH(TRIM(u6rfc)) = 13
-                     ORDER BY id LIMIT ?""", (args.limit,))
+                       AND id > ?
+                     ORDER BY id LIMIT ?""", (puntaje, args.limit))
         filas = c.fetchall()
         if not filas:
-            print("\nlote %d: sin filas pendientes" % (n_lote + 1))
+            print("\nlote %d: sin filas pendientes (puntaje=%d)" % (n_lote + 1, puntaje))
             break
 
         stats = Counter()
@@ -124,6 +175,15 @@ def main():
         print("    muestra:")
         for curp, id_ in updates[:3]:
             print("      id=%-9d %s" % (id_, curp))
+
+        # El puntero avanza con el ULTIMO id del lote, se haya calculado o no.
+        # Si solo avanzara con los `updates`, las 99,997 descartadas volverian
+        # a entrar en el siguiente lote y el sync no progresaria.
+        nuevo_puntaje = max(f[0] for f in filas)
+        if nuevo_puntaje > puntaje:
+            guardar_puntaje(nuevo_puntaje)
+            puntaje = nuevo_puntaje
+        print("    puntaje -> %d" % puntaje)
 
     print("\nESTADO FINAL")
     estado(conn)
