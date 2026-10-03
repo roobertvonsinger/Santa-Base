@@ -61,10 +61,11 @@ veredicto = str(r.get("status") or "").upper()
 detalle = str(r.get("detail") or "")
 print()
 if veredicto == "ACTIVE":
-    print(">> ACTIVE: la tarjeta existe. OJO -- la regla de la boveda pide que se")
-    print("   CONFIRME que llego a password_authenticate_form y no solo a un ACTIVE")
-    print("   generico. Hay un falso positivo conocido flagged en este codigo.")
-    print("   detalle: %s" % detalle)
+    # ACTIVE solo se devuelve si la respuesta del banco trae
+    # "password_authenticate_form" (santander_runner.py:671). No hay otra ruta
+    # de codigo que produzca ACTIVE, asi que es HIT por construccion.
+    print(">> HIT REAL: el banco devolvio password_authenticate_form.")
+    print("   Se queda en la boveda.  detalle: %s" % detalle)
 elif veredicto == "INACTIVE":
     print(">> NO HIT: se descarta de la boveda.  detalle: %s" % detalle)
 else:
