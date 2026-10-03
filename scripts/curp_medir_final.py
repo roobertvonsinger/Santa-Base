@@ -41,8 +41,7 @@ for rfc, nom, est, curp_real, gen in ref:
     real = curp_real.strip().upper()
     calc, det = calcular_curp(nom, rfc, est, genero_col=gen)
     if calc is None:
-        str(det).split(":")[0]
-        Descartes[str(det).split(":")[0]] += 1
+        descartes[str(det).split(":")[0]] += 1
         continue
     evaluadas += 1
     igual = True

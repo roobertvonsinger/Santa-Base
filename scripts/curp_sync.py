@@ -69,7 +69,7 @@ def main():
 
     for n_lote in range(args.lotes):
         c = conn.cursor()
-        c.execute("""SELECT id, u6rfc, dmname, u6estado FROM santander_records
+        c.execute("""SELECT id, u6rfc, dmname, u6estado, genero FROM santander_records
                      WHERE (curp IS NULL OR TRIM(curp) = '')
                        AND results IS NULL
                        AND u6rfc IS NOT NULL AND LENGTH(TRIM(u6rfc)) = 13
@@ -81,8 +81,10 @@ def main():
 
         stats = Counter()
         updates = []
-        for id_, rfc, nombre, estado_txt in filas:
-            curp, det = calcular_curp(nombre, rfc, estado_txt, genero_col=None)
+        for id_, rfc, nombre, estado_txt, genero in filas:
+            # `genero` se pasa: es el unico dato de sexo que existe y vale mas
+            # que el lexico. Sin el, MARIA+JESUS se resuelve como M siendo H.
+            curp, det = calcular_curp(nombre, rfc, estado_txt, genero_col=genero)
             if curp is None:
                 stats[str(det).split(":")[0]] += 1
                 continue
