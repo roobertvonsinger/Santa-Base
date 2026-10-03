@@ -30,3 +30,4 @@ _uvicorn*.err
 purger_*.log
 lex_data_out.txt
 cola_out.txt
+sync*.log
