@@ -68,18 +68,26 @@ def build_segment_query(
     prioridad: str = "credito_desc",
     limit: Optional[int] = 100
 ) -> Tuple[str, List[Any]]:
-    """Construye consulta parametrizada con sanitización de moneda y campos completos para hits."""
+    """Construye consulta parametrizada con sanitización de moneda y campos completos para hits.
+
+    NOTA: el filtro de estado va contra `u6estado`, NO contra `estado`. La columna
+    `estado` solo está poblada en las 717 filas ya procesadas (1 estado, Jalisco)
+    y es NULL en las 4,861,640 filas del pool; usar `estado` hacía que el purger
+    viera cero candidatos. `u6estado` tiene 1,115 valores distintos y es el dato
+    real de la entidad de registro.
+    """
     sql = """
-        SELECT id, u6acct, curp, u6rfc, dmname, estado, ciudad, codigo_postal,
-               u6licrea, fecha_nacimiento, genero, u6ladte1, u6tel1, dmaddr1, dmaddr2
+        SELECT id, u6acct, curp, u6rfc, dmname, u6estado, dmcity, dmzip,
+               u6licrea, NULL AS fecha_nacimiento, NULL AS genero,
+               u6ladte1, u6tel1, dmaddr1, dmaddr2
         FROM santander_records
         WHERE curp IS NOT NULL AND TRIM(curp) != ''
           AND results IS NULL
     """
     params: List[Any] = []
-    
+
     if estado:
-        sql += " AND UPPER(estado) = UPPER(?)"
+        sql += " AND UPPER(u6estado) = UPPER(?)"
         params.append(estado)
         
     if min_credito > 0:
@@ -87,15 +95,20 @@ def build_segment_query(
         params.append(min_credito)
         
     if born_after:
-        sql += " AND fecha_nacimiento >= ?"
-        params.append(born_after)
-        
+        # `fecha_nacimiento` solo existe en las 717 filas procesadas (NULL en el
+        # pool). En el pool la edad sale del RFC: u6rfc[4:10] es YYMMDD.
+        sql += " AND SUBSTR(u6rfc, 5, 6) >= ?"
+        params.append(born_after[2:4] + born_after[5:7] + born_after[8:10])
+
     if prioridad == "credito_desc":
         sql += " ORDER BY CAST(REPLACE(REPLACE(COALESCE(u6licrea, '0'), '$', ''), ',', '') AS INTEGER) DESC"
     elif prioridad == "edad_desc":
-        sql += " ORDER BY fecha_nacimiento DESC"
+        # Mayor edad = fecha de nacimiento mas temprano. El RFC va por century:
+        # losNacidos antes de 2000 tienen prefijo YY >= 30 en este corpus.
+        sql += " ORDER BY SUBSTR(u6rfc, 5, 2) DESC"
     elif prioridad == "mixto":
-        sql += " ORDER BY CAST(REPLACE(REPLACE(COALESCE(u6licrea, '0'), '$', ''), ',', '') AS INTEGER) DESC, fecha_nacimiento DESC"
+        sql += (" ORDER BY CAST(REPLACE(REPLACE(COALESCE(u6licrea, '0'), '$', ''), ',', '') AS INTEGER) DESC,"
+                " SUBSTR(u6rfc, 5, 2) DESC")
     else:
         sql += " ORDER BY id ASC"
         

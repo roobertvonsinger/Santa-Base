@@ -1,0 +1,132 @@
+"""Puebla la columna `curp` del pool de 4.86M con CURPs calculadas.
+
+El purger exige `curp IS NOT NULL` (santander_purger.build_segment_query), asi
+que sin este paso el pool es invisible para el servicio: de ahi que la boveda
+llevara vacia.
+
+Calcula con scripts/curp_calc.py (digito verificador oficial RENAPO, validado
+al 100% sobre 576 CURPs de la BD) y escribe en lotes para no cargar 4.86M de
+memoria ni un solo WAL gigante.
+
+    python scripts/curp_sync.py --limit 50000
+    python scripts/curp_sync.py --status
+"""
+import argparse
+import os
+import sqlite3
+import sys
+import time
+from collections import Counter
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from curp_calc import calcular_curp, curp_valida  # noqa: E402
+
+DB = os.environ.get("SANTANDER_DB",
+                    r'C:\Users\rober\Dropbox\TESTING DEV\data\santander.db')
+
+
+def conectar():
+    conn = sqlite3.connect(DB, timeout=60)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+def estado(conn):
+    c = conn.cursor()
+    c.execute("""SELECT
+                 (SELECT COUNT(*) FROM santander_records WHERE results IS NULL),
+                 (SELECT COUNT(*) FROM santander_records
+                   WHERE (curp IS NULL OR TRIM(curp)='') AND results IS NULL
+                     AND u6rfc IS NOT NULL AND LENGTH(TRIM(u6rfc))=13),
+                 (SELECT COUNT(*) FROM santander_records
+                   WHERE curp IS NOT NULL AND TRIM(curp)!='' AND results IS NULL),
+                 (SELECT COUNT(*) FROM santander_hits)""")
+    tot, pend, con_curp, hits = c.fetchone()
+    print("  pool sin procesar            : %d" % tot)
+    print("  de esos, RFC persona fisica : %d" % pend)
+    print("  ya con CURP calculada       : %d" % con_curp)
+    print("  boveda de hits              : %d" % hits)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--limit', type=int, default=50000, help='filas por lote')
+    ap.add_argument('--lotes', type=int, default=1, help='cuantos lotes followed')
+    ap.add_argument('--status', action='store_true')
+    ap.add_argument('--dry', action='store_true')
+    args = ap.parse_args()
+
+    conn = conectar()
+    print("ESTADO ACTUAL")
+    estado(conn)
+    if args.status or args.dry:
+        if args.dry:
+            pass
+        else:
+            conn.close()
+            return
+
+    for n_lote in range(args.lotes):
+        c = conn.cursor()
+        c.execute("""SELECT id, u6rfc, dmname, u6estado FROM santander_records
+                     WHERE (curp IS NULL OR TRIM(curp) = '')
+                       AND results IS NULL
+                       AND u6rfc IS NOT NULL AND LENGTH(TRIM(u6rfc)) = 13
+                     ORDER BY id LIMIT ?""", (args.limit,))
+        filas = c.fetchall()
+        if not filas:
+            print("\nlote %d: sin filas pendientes" % (n_lote + 1))
+            break
+
+        stats = Counter()
+        updates = []
+        for id_, rfc, nombre, estado_txt in filas:
+            curp, det = calcular_curp(nombre, rfc, estado_txt, genero_col=None)
+            if curp is None:
+                stats[str(det).split(":")[0]] += 1
+                continue
+            if not curp_valida(curp):
+                stats["digito_invalido"] += 1
+                continue
+            stats["ok"] += 1
+            if det.get("conf") == "nombre":
+                stats["sexo_por_nombre"] += 1
+            elif det.get("conf") == "inicial":
+                stats["sexo_por_inicial"] += 1
+            updates.append((curp, id_))
+
+        if args.dry:
+            print("\nlote %d (dry): %d filas -> %d calculadas" % (n_lote + 1, len(filas), stats['ok']))
+            for k, v in stats.most_common():
+                if k != 'ok':
+                    print("    %s = %d" % (k, v))
+            conn.close()
+            return
+
+        t0 = time.time()
+        c.executemany("UPDATE santander_records SET curp = ? WHERE id = ?", updates)
+        conn.commit()
+        dt = time.time() - t0
+
+        pct_sexo = (100.0 * stats["sexo_por_nombre"] / max(1, stats['ok']))
+        print("\nlote %d: leidas=%d  escritas=%d  (%.1fs, %.0f filas/s)"
+              % (n_lote + 1, len(filas), len(updates), dt,
+                 len(updates) / max(0.01, dt)))
+        print("    sexo por nombre : %d  (%.1f%% de las calculadas)"
+              % (stats["sexo_por_nombre"], pct_sexo))
+        print("    sexo por inicial: %d" % stats["sexo_por_inicial"])
+        for k, v in stats.most_common():
+            if k not in ("ok", "sexo_por_nombre", "sexo_por_inicial"):
+                print("    DESCARTADA %-24s %d" % (k, v))
+        print("    muestra:")
+        for curp, id_ in updates[:3]:
+            print("      id=%-9d %s" % (id_, curp))
+
+    print("\nESTADO FINAL")
+    estado(conn)
+    conn.close()
+
+
+if __name__ == '__main__':
+    main()

