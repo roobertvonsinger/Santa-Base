@@ -26,3 +26,7 @@ santander_*.bak-*
 scratch_*.js
 _uvicorn*.log
 _uvicorn*.err
+# logs de pruebas locales del purger
+purger_*.log
+lex_data_out.txt
+cola_out.txt
