@@ -4,7 +4,7 @@
 > **Repositorio Oficial:** [github.com/roobertvonsinger/Santa-Base](https://github.com/roobertvonsinger/Santa-Base)  
 > **VPS:** Karen KVM4 (`2.25.98.162`) — `/opt/kvm4/apps/santander/` (código + `data/santander.db`, 4.9M registros, mismo directorio)  
 > **Servicios systemd en VPS:** `santander.service` (visor FastAPI, puerto 8055, Restart=always) + `santander-purger.service` (auto-revisión de CURPs, Restart=always, unit en `scripts/santander-purger.service`)  
-> **Última sincronización:** 2026-09-30  
+> **Última sincronización:** 2026-10-04  
 
 ---
 
@@ -41,6 +41,28 @@
 4. **Purger Automático y Regla de Edad (`santander_purger.py`):**
    - Umbral de nacimiento `1963-01-01` (excluye 1962 y anteriores) en código y en `santander-purger.service` en Karen VPS KVM4.
 5. **Estado verificado de la BD al cierre:** 135 hits, 5 con `card_verified=1`, 130 pendientes de verificar.
+
+---
+
+## 🔧 Bitácora de Sesión 2026-10-04 — El Umbral de Edad Mentía y el Suite Estaba Rojo
+
+1. **Causa raíz del "RESTAN >= $484k" clavado en 491 (finde `dbbb1ac`):**
+   - Tres sondas tenían `'600101'` (1960-01-01) hardcodeado mientras el purger corre con `--born-after 1963-01-01` (default del argparse y del unit systemd). Contaban 491 filas de 1948-1959 que el purger jamás iba a tocar. **El número era elmento, no el pool.**
+   - El corte de edad vive ahora en `santander_purger.BORN_AFTER_DEFAULT`; `scripts/sondas/umbral.py` lo importa desde ahí, así que sondas y purger no pueden separarse sin que se note.
+   - **Efecto medido:** banda $100k–250k pasó de 95,661 (umbral viejo) a **74,090** filas reales. La banda $250k–484k quedó igual en 0 — está agotada de verdad, se acabó.
+2. **Rendimiento por banda de crédito (medido, no estimado):**
+
+   | Banda | En cola | Ya proc. | OFF | Tarjeta inactiva | HIT | Tasa HIT |
+   |---|---|---|---|---|---|---|
+   | $250k–484k | 0 | 2,009 | 1,851 | 153 | 5 | 0.25% |
+   | $100k–250k | 74,090 | 1,208 | 1,112 | 92 | 4 | 0.33% |
+   | $50k–100k | 211,683 | 6 | 6 | 0 | 0 | — |
+   | $0–50k | 2,636,335 | 36 | 36 | 0 | 0 | — |
+
+   Las dos bandas que ya rindieron muestran ~0.25-0.33% de tasa HIT. Los 4.5M de requests de material bajo **no se han medido todavía** — es la siguiente decisión, no un hecho.
+3. **Suite de tests roja desde antes de esta sesión (finde `442df17`):** 10 tests fallaban en `08b208c` también, por asserts que describían decisiones ya sustituidas (`estado`→`u6estado`, `fecha_nacimiento`→`SUBSTR(u6rfc)`, columna `telefono` eliminada, estados `NUEVO/EN_GESTION/CERRADO`→`ACTIVE/SUCCESS/OFF`, `claim` que ya no auto-cierra). Alineados con el código real. **Suite completa: 36 passed.**
+4. **Servidor local:** `uvicorn app:app --host 127.0.0.1 --port 8055` corriendo y verificado (login + `/api/stats` + `/api/purger/status` responden 200).
+5. **Purger local en pausa por diseño:** `state=PAUSED_HITS_POOL`, bóveda 12/12 (el pool se pausó solo al llenarse). No se levantó a ciegas — la lesson de `feedback_no_auto_drain_proxies` aplica: primero raíz, después desatendido.
 
 ---
 
