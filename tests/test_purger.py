@@ -6,8 +6,12 @@ import time
 
 def test_query_builder():
     from santander_purger import build_segment_query
-    
-    # 1. Filtro básico por estado y orden de crédito
+
+    # 1. Filtro básico por estado y orden de crédito.
+    # El filtro de estado va contra `u6estado`, NO contra `estado`: `estado` solo
+    # está poblada en las ~717 filas ya procesadas y es NULL en el resto del pool
+    # (4.8M), así que filtrar por ahí hacía que el purger viera cero candidatos.
+    # La edad sale de SUBSTR(u6rfc,5,6) por la misma razón.
     sql, params = build_segment_query(
         estado="CIUDAD DE MEXICO",
         min_credito=50000,
@@ -16,17 +20,17 @@ def test_query_builder():
         limit=100
     )
     assert "FROM santander_records" in sql
-    assert "UPPER(estado) = UPPER(?)" in sql
+    assert "UPPER(u6estado) = UPPER(?)" in sql
     assert "curp IS NOT NULL" in sql
     assert "results IS NULL" in sql
     assert "CAST(REPLACE(REPLACE(COALESCE(u6licrea, '0'), '$', ''), ',', '') AS INTEGER) >= ?" in sql
-    assert "fecha_nacimiento >= ?" in sql
+    assert "SUBSTR(u6rfc, 5, 6) >= ?" in sql
     assert "ORDER BY CAST(REPLACE(REPLACE(COALESCE(u6licrea, '0'), '$', ''), ',', '') AS INTEGER) DESC" in sql
-    assert params == ["CIUDAD DE MEXICO", 50000, "1985-01-01", 100]
+    assert params == ["CIUDAD DE MEXICO", 50000, "850101", 100]
 
 def test_query_builder_edad():
     from santander_purger import build_segment_query
-    
+
     sql, params = build_segment_query(
         estado="JALISCO",
         min_credito=0,
@@ -34,9 +38,25 @@ def test_query_builder_edad():
         prioridad="edad_desc",
         limit=50
     )
-    assert "UPPER(estado) = UPPER(?)" in sql
-    assert "ORDER BY fecha_nacimiento DESC" in sql
+    assert "UPPER(u6estado) = UPPER(?)" in sql
+    # Sin `fecha_nacimiento` porque en el pool es NULL: el orden por edad va
+    # contra el año del RFC (YY), no contra la columna que no existe ahí.
+    assert "ORDER BY SUBSTR(u6rfc, 5, 2) DESC" in sql
     assert params == ["JALISCO", 50]
+
+def test_born_after_default_is_single_source():
+    """El umbral de edad debe ser UNA constante, no un literal repetido.
+
+    Las sondas (scripts/sondas/umbral.py) la importan desde acá. Antes cada
+    sonda pegaba su propio '600101' y el purger corría 1963-01-01: las sondas
+    contaban material que el purger jamás iba a tocar.
+    """
+    from santander_purger import BORN_AFTER_DEFAULT, build_segment_query
+
+    assert BORN_AFTER_DEFAULT == "1963-01-01"
+
+    _, params = build_segment_query(born_after=BORN_AFTER_DEFAULT)
+    assert params == ["630101", 100]  # el 100 es el LIMIT por defecto
 
 def test_parse_multistate_arg():
     from santander_purger import parse_estados_quotas
@@ -107,7 +127,7 @@ def test_sqlite_batch_writer_with_hits():
         
         writer = SqliteBatchWriter(path)
         writer.start()
-        
+
         rec1 = {
             "id": 1,
             "u6acct": "41523134",
@@ -120,30 +140,31 @@ def test_sqlite_batch_writer_with_hits():
             "u6licrea": "$50,000",
             "fecha_nacimiento": "1990-01-01",
             "genero": "H",
-            "telefono": "618 1234567",
             "direccion": "CALLE 1 COL 1"
         }
-        
-        # HIT (Verde) debe escribirse de inmediato en santander_hits con work_status='NUEVO'
+
+        # HIT (Verde) entra a la boveda con work_status='ACTIVE' (sin trabajar).
+        # La columna `telefono` ya no existe: se elimino de la boveda a proposito
+        # (13 columnas) junto con `accion`.
         writer.enqueue(record_dict=rec1, result="HIT", is_green=True)
         time.sleep(0.1) # Breve tiempo para flush
-        
+
         # OFF (Descarte)
         rec2 = {"id": 2, "curp": "CURP02"}
         writer.enqueue(record_dict=rec2, result="OFF: PE1002", is_green=False)
-        
+
         writer.close()
-        
+
         # Verificar resultados en santander_records y santander_hits
         conn = sqlite3.connect(path)
         r1 = conn.execute("SELECT results FROM santander_records WHERE id=1").fetchone()[0]
         r2 = conn.execute("SELECT results FROM santander_records WHERE id=2").fetchone()[0]
-        hit_row = conn.execute("SELECT curp, dmname, estado, telefono, work_status FROM santander_hits WHERE id=1").fetchone()
+        hit_row = conn.execute("SELECT curp, dmname, estado, direccion, work_status FROM santander_hits WHERE id=1").fetchone()
         conn.close()
-        
+
         assert r1 == "HIT"
         assert r2 == "OFF: PE1002"
-        assert hit_row == ("CURP01", "JUAN PEREZ", "DURANGO", "618 1234567", "NUEVO")
+        assert hit_row == ("CURP01", "JUAN PEREZ", "DURANGO", "CALLE 1 COL 1", "ACTIVE")
     finally:
         if os.path.exists(path):
             os.remove(path)
@@ -172,14 +193,15 @@ def test_sqlite_batch_writer_insert_or_ignore_preserves_operator_work():
             CREATE TABLE santander_hits (
                 id INTEGER PRIMARY KEY, u6acct TEXT, curp TEXT NOT NULL UNIQUE, u6rfc TEXT,
                 dmname TEXT, estado TEXT, ciudad TEXT, codigo_postal TEXT, u6licrea TEXT,
-                fecha_nacimiento TEXT, genero TEXT, telefono TEXT, direccion TEXT,
-                work_status TEXT DEFAULT 'NUEVO', operador TEXT, notas TEXT,
+                fecha_nacimiento TEXT, genero TEXT, direccion TEXT,
+                work_status TEXT DEFAULT 'ACTIVE', operador TEXT, notas TEXT,
+                card_verified INTEGER DEFAULT 0,
                 checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
         conn.execute("""
             INSERT INTO santander_hits (id, curp, dmname, work_status, operador, notas)
-            VALUES (1, 'CURP01', 'JUAN PEREZ', 'CERRADO', 'Luisito', 'Cliente ya contactado')
+            VALUES (1, 'CURP01', 'JUAN PEREZ', 'SUCCESS', 'Luisito', 'Cliente ya contactado')
         """)
         conn.commit()
         conn.close()
@@ -194,7 +216,7 @@ def test_sqlite_batch_writer_insert_or_ignore_preserves_operator_work():
         row = conn.execute("SELECT work_status, operador, notas FROM santander_hits WHERE id=1").fetchone()
         conn.close()
 
-        assert row == ("CERRADO", "Luisito", "Cliente ya contactado")
+        assert row == ("SUCCESS", "Luisito", "Cliente ya contactado")
     finally:
         if os.path.exists(path):
             os.remove(path)
@@ -209,18 +231,20 @@ def test_count_unworked_hits_and_pool_thresholds():
         conn = sqlite3.connect(path)
         conn.execute("""
             CREATE TABLE santander_hits (
-                id INTEGER PRIMARY KEY, curp TEXT, work_status TEXT DEFAULT 'NUEVO'
+                id INTEGER PRIMARY KEY, curp TEXT, work_status TEXT DEFAULT 'ACTIVE'
             );
         """)
+        # ACTIVE = sin trabajar, es lo que cuenta para el pool. SUCCESS ya fue
+        # tocado por un operador y OFF fue descartado: ninguno frena el purger.
         for i in range(1, 6):
-            conn.execute("INSERT INTO santander_hits (id, curp, work_status) VALUES (?, ?, 'NUEVO')", (i, f"CURP{i}"))
+            conn.execute("INSERT INTO santander_hits (id, curp, work_status) VALUES (?, ?, 'ACTIVE')", (i, f"CURP{i}"))
         for i in range(6, 9):
-            conn.execute("INSERT INTO santander_hits (id, curp, work_status) VALUES (?, ?, 'CERRADO')", (i, f"CURP{i}"))
+            conn.execute("INSERT INTO santander_hits (id, curp, work_status) VALUES (?, ?, 'SUCCESS')", (i, f"CURP{i}"))
         conn.commit()
         conn.close()
 
         daemon = SegmentedPurgerDaemon(db_path=path, hits_pool_max=5, hits_pool_resume=2)
-        # Solo cuenta work_status='NUEVO' (5), no los CERRADO (3)
+        # Solo cuenta work_status='ACTIVE' (5), no los SUCCESS (3)
         assert daemon._count_unworked_hits() == 5
         assert daemon._count_unworked_hits() >= daemon.hits_pool_max  # dispararia la pausa
     finally:

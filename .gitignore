@@ -32,3 +32,9 @@ lex_data_out.txt
 cola_out.txt
 sync*.log
 .curp_sync_puntaje
+
+# Screenshots que escribe tests/test_playwright_render.py en cada corrida.
+# Son artefactos de depuracion visual, no baselines: nada los compara, asi que
+# tenerlos versionados solo metia ruido en el diff de cada test run.
+tests/dashboard_populated.png
+tests/dashboard_preview.png

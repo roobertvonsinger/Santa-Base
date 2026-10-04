@@ -40,16 +40,16 @@ def setup_test_db(tmp_path, monkeypatch):
             u6licrea TEXT,
             fecha_nacimiento TEXT,
             genero TEXT,
-            telefono TEXT,
             direccion TEXT,
-            work_status TEXT DEFAULT 'NUEVO',
+            work_status TEXT DEFAULT 'ACTIVE',
             operador TEXT,
             notas TEXT,
+            card_verified INTEGER DEFAULT 0,
             checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
-    
+
     # Insertar registros de prueba en santander_records
     conn.execute("""
         INSERT INTO santander_records (id, u6rfc, curp, dmname, estado, results, u6licrea)
@@ -57,11 +57,11 @@ def setup_test_db(tmp_path, monkeypatch):
                (2, 'GOMA920512ABC', 'GOMA920512MDFR02', 'MARIA TEST', 'DURANGO', NULL, '$80,000'),
                (3, 'PEPR750304DEF', 'PEPR750304HDFR03', 'PEDRO TEST', 'DURANGO', 'OFF', '$40,000')
     """)
-    
+
     # Insertar en santander_hits
     conn.execute("""
         INSERT INTO santander_hits (id, u6acct, curp, u6rfc, dmname, estado, ciudad, u6licrea, work_status)
-        VALUES (1, '1234567812345678', 'ROVR880101HDFR01', 'ROVR880101XYZ', 'ROBERTO TEST', 'CIUDAD DE MEXICO', 'BENITO JUAREZ', '$150,000', 'NUEVO')
+        VALUES (1, '1234567812345678', 'ROVR880101HDFR01', 'ROVR880101XYZ', 'ROBERTO TEST', 'CIUDAD DE MEXICO', 'BENITO JUAREZ', '$150,000', 'ACTIVE')
     """)
     conn.commit()
     conn.close()
@@ -75,7 +75,9 @@ def test_api_stats_includes_hits():
     assert res.status_code == 200
     data = res.json()
     assert data["hits_total"] == 1
-    assert data["hits_nuevos"] == 1
+    # La boveda se expone como hits_total + hits_active. Los tres estados son
+    # ACTIVE (sin trabajar) / SUCCESS (trabajado) / OFF (descartado).
+    assert data["hits_active"] == 1
 
 def test_get_hits_endpoint():
     res = client.get("/api/hits", cookies=auth_cookies())
@@ -84,19 +86,22 @@ def test_get_hits_endpoint():
     assert data["total"] == 1
     assert len(data["hits"]) == 1
     assert data["hits"][0]["curp"] == "ROVR880101HDFR01"
-    assert data["hits"][0]["work_status"] == "NUEVO"
-    assert data["stats"]["nuevo"] == 1
+    assert data["hits"][0]["work_status"] == "ACTIVE"
+    # El desglose va en minusculas: active / success / off
+    assert data["stats"]["active"] == 1
+    assert data["stats"]["success"] == 0
+    assert data["stats"]["off"] == 0
 
 def test_patch_hit_work_status_and_notes():
     payload = {
-        "work_status": "EN_GESTION",
+        "work_status": "SUCCESS",
         "notas": "Cliente interesado, contactar 5pm"
     }
     res = client.patch("/api/hits/1", json=payload, cookies=auth_cookies())
     assert res.status_code == 200
     data = res.json()
     assert data["ok"] is True
-    assert data["hit"]["work_status"] == "EN_GESTION"
+    assert data["hit"]["work_status"] == "SUCCESS"
     assert data["hit"]["notas"] == "Cliente interesado, contactar 5pm"
     assert data["hit"]["operador"] == "RobertVS"
 
@@ -125,7 +130,9 @@ def test_claim_hit_assigns_operador_and_status():
     data = res.json()
     assert data["ok"] is True
     assert data["claimed"] is True
-    assert data["hit"]["work_status"] == "EN_GESTION"
+    # `claim` SOLO registra quien tomo el lead. El estatus no lo mueve a
+    # "EN_GESTION": sigue ACTIVE hasta que el operador marque SUCCESS u OFF.
+    assert data["hit"]["work_status"] == "ACTIVE"
     assert data["hit"]["operador"] == "RobertVS"
 
 def test_claim_hit_idempotent_for_same_operator():
@@ -146,7 +153,7 @@ def test_claim_hit_does_not_steal_from_another_operator():
     data = second.json()
     assert data["claimed"] is False
     assert data["hit"]["operador"] == "RobertVS"
-    assert data["hit"]["work_status"] == "EN_GESTION"
+    assert data["hit"]["work_status"] == "ACTIVE"
 
 def test_claim_hit_requires_auth():
     res = client.post("/api/hits/1/claim")
@@ -160,8 +167,8 @@ def test_claim_hit_operator_single_lead_auto_closes_previous():
     conn = get_db_connection()
     conn.execute("""
         INSERT INTO santander_hits (id, u6acct, curp, u6rfc, dmname, estado, ciudad, u6licrea, work_status)
-        VALUES (2, '2222', 'CURP2222', 'RFC2', 'NAME 2', 'JALISCO', 'GDL', '$200,000', 'NUEVO'),
-               (3, '3333', 'CURP3333', 'RFC3', 'NAME 3', 'JALISCO', 'GDL', '$300,000', 'NUEVO')
+        VALUES (2, '2222', 'CURP2222', 'RFC2', 'NAME 2', 'JALISCO', 'GDL', '$200,000', 'ACTIVE'),
+               (3, '3333', 'CURP3333', 'RFC3', 'NAME 3', 'JALISCO', 'GDL', '$300,000', 'ACTIVE')
     """)
     conn.commit()
     conn.close()
@@ -169,20 +176,23 @@ def test_claim_hit_operator_single_lead_auto_closes_previous():
     # Luisito (operator) reclama hit 2
     res1 = client.post("/api/hits/2/claim", cookies=other_operator_cookies())
     assert res1.json()["claimed"] is True
-    assert res1.json()["hit"]["work_status"] == "EN_GESTION"
+    assert res1.json()["hit"]["work_status"] == "ACTIVE"
     assert res1.json()["hit"]["operador"] == "Luisito"
     assert res1.json()["closed_previous_id"] is None
 
-    # Luisito reclama hit 3 -> el hit 2 anterior se auto-cierra
+    # Luisito reclama hit 3 -> ya NO se auto-cierra el 2. El auto-cierre se
+    # quito a proposito: el operador puede tener varios leads vivos a la vez y
+    # cerrarlos desde la UI. `claim` es solo "este es mio".
     res2 = client.post("/api/hits/3/claim", cookies=other_operator_cookies())
     assert res2.json()["claimed"] is True
-    assert res2.json()["hit"]["work_status"] == "EN_GESTION"
-    assert res2.json()["closed_previous_id"] == 2
+    assert res2.json()["hit"]["work_status"] == "ACTIVE"
+    assert res2.json()["hit"]["operador"] == "Luisito"
+    assert res2.json()["closed_previous_id"] is None
 
-    # Verificar en BD que hit 2 ahora está CERRADO
+    # Verificar en BD que hit 2 sigue ACTIVE con Luisito como operador
     conn = get_db_connection()
-    row2 = conn.execute("SELECT work_status, notas FROM santander_hits WHERE id = 2").fetchone()
-    assert row2[0] == "CERRADO"
-    assert "Auto-cerrado" in row2[1]
+    row2 = conn.execute("SELECT work_status, operador FROM santander_hits WHERE id = 2").fetchone()
+    assert row2[0] == "ACTIVE"
+    assert row2[1] == "Luisito"
     conn.close()
 
