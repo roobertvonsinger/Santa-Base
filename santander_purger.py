@@ -80,6 +80,13 @@ DEFAULT_DB_PATH = _resolve_db_path()
 # Medido: 9,611 reintentos en una hora con el proxy muerto, cero resultados.
 RETRY_CIRCUIT_LIMIT = 30
 
+# Umbral de edad canonico. Vive aqui como constante para que `--born-after` lo
+# consuma y las sondas (scripts/sondas/umbral.py) lo importen de una sola fuente.
+# Si esto cambia, el conteo de "material disponible" de las sondas cambia con el.
+# Antes estaba pegado a mano como '600101' en tres sondas mientras el purger
+# corria con 1963-01-01 -- las sondas contaban filas que el purger jamas tocaba.
+BORN_AFTER_DEFAULT = "1963-01-01"
+
 PROXY_GATE_URL = "http://127.0.0.1:8888/proxy"
 # El status JSON vive siempre junto a la BD activa (mismo directorio que DEFAULT_DB_PATH ya resolvió),
 # nunca hardcodeado por separado — evita que purger y app.py apunten a rutas distintas en VPS.
@@ -781,7 +788,7 @@ def main():
     parser.add_argument("--estado", default=None, help="Filtrar por un estado canónico único (ej. 'CIUDAD DE MEXICO')")
     parser.add_argument("--estados", default=None, help="Lote multi-estado con cuotas (ej. 'DURANGO:250,CIUDAD DE MEXICO:250')")
     parser.add_argument("--min-credito", type=int, default=0, help="Límite de crédito mínimo en pesos")
-    parser.add_argument("--born-after", default="1963-01-01", help="Fecha de nacimiento mínima YYYY-MM-DD (default: '1963-01-01', excluye 1962 y anteriores)")
+    parser.add_argument("--born-after", default=BORN_AFTER_DEFAULT, help="Fecha de nacimiento mínima YYYY-MM-DD (default: '%s', excluye 1962 y anteriores)" % BORN_AFTER_DEFAULT)
     parser.add_argument("--prioridad", choices=["credito_desc", "edad_desc", "mixto"], default="credito_desc", help="Criterio de ordenación")
     parser.add_argument("--limit", type=int, default=100, help="Cantidad de registros a procesar por ráfaga")
     parser.add_argument("--workers", type=int, default=5, help="Cantidad de navegadores paralelos (default: 5)")
