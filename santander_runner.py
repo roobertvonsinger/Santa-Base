@@ -364,10 +364,22 @@ async def check_single_curp(
     """Verifica un CURP vía pipeline HTTP directo (Chrome 120 TLS) en ~5-7 segundos sin navegadores.
 
     `use_proxy=False` = directo, sin proxy (ver nota en _check_curp_sync).
+    Protegido con timeout global asíncrono para evitar cuelgues de socket en Windows.
     """
-    return await asyncio.to_thread(_check_curp_sync, curp, proxy=proxy,
-                                   state=state, lat=lat, lon=lon,
-                                   use_proxy=use_proxy)
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_check_curp_sync, curp, proxy=proxy,
+                              state=state, lat=lat, lon=lon,
+                              use_proxy=use_proxy),
+            timeout=22.0
+        )
+    except asyncio.TimeoutError:
+        return {
+            "curp": curp,
+            "status": "RETRY",
+            "detail": "Timeout global de verificación (22s)",
+            "time": 22.0
+        }
 
 
 async def run_batch(curps: list[str], concurrency: int = 3) -> list[dict]:
