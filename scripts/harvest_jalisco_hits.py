@@ -93,7 +93,7 @@ def count_unworked_hits(conn) -> int:
 async def harvest(
     target_hits: int = 100,
     max_checks: int = 5000,
-    delay_sec: float = 2.0,
+    delay_sec: float = 0.6,
     min_credito: int = 50000,
     estados_filter: Optional[List[str]] = None,
     hits_pool_max: int = 15,
@@ -112,12 +112,13 @@ async def harvest(
     print(f"Bóveda Pool Cap: Pausa en {hits_pool_max} hits ACTIVE, Reanuda en {hits_pool_resume}")
     print("-" * 70)
 
+    start_time = time.time()
     stats = {
         "total_processed": 0,
         "hits": 0,
         "offs": 0,
         "retries": 0,
-        "state": "BURST",
+        "state": "BURST" if not os.path.exists(PAUSE_FLAG_PATH) else "PAUSED_MANUAL",
         "rate_per_min": 0.0,
         "active_workers": 1
     }
@@ -125,8 +126,6 @@ async def harvest(
 
     conn = get_db()
     cur = conn.cursor()
-
-    paused_for_pool = False
 
     while True:
         # Construir consulta
@@ -169,34 +168,32 @@ async def harvest(
         for row in candidates:
             # 1. Chequeo de Pausa Manual desde UI (purger_pause.flag)
             while os.path.exists(PAUSE_FLAG_PATH):
-                stats["state"] = "PAUSED_MANUAL"
-                write_telemetry(stats)
+                if stats["state"] != "PAUSED_MANUAL":
+                    stats["state"] = "PAUSED_MANUAL"
+                    stats["rate_per_min"] = 0.0
+                    write_telemetry(stats)
                 print("[⏸️] Pausado manualmente desde la UI. Esperando reanudación...", end="\r", flush=True)
-                await asyncio.sleep(2.5)
+                await asyncio.sleep(1.5)
 
             # 2. Chequeo de Pool Cap (no quemar proxy si la bóveda tiene suficientes leads activos)
             unworked = count_unworked_hits(conn)
-            if paused_for_pool and unworked > hits_pool_resume:
+            if unworked >= hits_pool_max:
                 stats["state"] = "PAUSED_HITS_POOL"
-                write_telemetry(stats)
-                print(f"[⏸️] Pool de hits lleno ({unworked} activos). Esperando que operadores trabajen...", end="\r", flush=True)
-                await asyncio.sleep(15.0)
-                continue
-            elif not paused_for_pool and unworked >= hits_pool_max:
-                paused_for_pool = True
-                stats["state"] = "PAUSED_HITS_POOL"
+                stats["rate_per_min"] = 0.0
                 write_telemetry(stats)
                 print(f"\n[⏸️] Pool de hits llegó a {unworked} (>= {hits_pool_max}). Pausando para no quemar proxy.", flush=True)
-                await asyncio.sleep(15.0)
-                continue
-            elif paused_for_pool and unworked <= hits_pool_resume:
-                paused_for_pool = False
-                print(f"\n[▶️] Pool de hits bajó a {unworked} (<= {hits_pool_resume}). Reanudando cosechador.", flush=True)
+                while count_unworked_hits(conn) > hits_pool_resume:
+                    if os.path.exists(PAUSE_FLAG_PATH):
+                        stats["state"] = "PAUSED_MANUAL"
+                        write_telemetry(stats)
+                    await asyncio.sleep(8.0)
+                print(f"[▶️] Pool de hits bajó a {count_unworked_hits(conn)} (<= {hits_pool_resume}). Reanudando cosechador.", flush=True)
 
             stats["state"] = "BURST"
 
-            if stats["hits"] >= target_hits or stats["total_processed"] >= max_checks:
-                break
+            if not daemon_mode:
+                if stats["hits"] >= target_hits or (max_checks and stats["total_processed"] >= max_checks):
+                    break
 
             rid = row["id"]
             rfc = (row["u6rfc"] or "").strip().upper()
@@ -311,11 +308,15 @@ async def harvest(
                 stats["retries"] += 1
                 print(f"[⚠️ {status}] {detail} ({dur:.1f}s)")
 
+            elapsed_m = (time.time() - start_time) / 60.0
+            if elapsed_m > 0.05:
+                stats["rate_per_min"] = round(stats["total_processed"] / elapsed_m, 1)
+
             write_telemetry(stats)
             await asyncio.sleep(delay_sec)
 
-        if stats["hits"] >= target_hits or stats["total_processed"] >= max_checks:
-            if not daemon_mode:
+        if not daemon_mode:
+            if stats["hits"] >= target_hits or (max_checks and stats["total_processed"] >= max_checks):
                 break
 
     stats["state"] = "STOPPED"
@@ -329,7 +330,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SantaBase — Cosechador Universal")
     parser.add_argument("--target-hits", type=int, default=50)
     parser.add_argument("--max-checks", type=int, default=2000)
-    parser.add_argument("--delay", type=float, default=2.0)
+    parser.add_argument("--delay", type=float, default=0.6)
     parser.add_argument("--min-credito", type=int, default=50000)
     parser.add_argument("--estados", type=str, default=None, help="Estados separados por coma (o omitir para nacional)")
     parser.add_argument("--daemon", action="store_true", help="Modo continuo desatendido")

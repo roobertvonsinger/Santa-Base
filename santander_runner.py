@@ -146,7 +146,7 @@ def _execute_attempt(
         r1 = session.get(
             "https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/session/init",
             headers=headers,
-            timeout=8
+            timeout=6
         )
         if r1.status_code != 200:
             return {
@@ -167,7 +167,7 @@ def _execute_attempt(
                     "originFlow": "/cuenta-digital-lite/personal-data"
                 }
             },
-            timeout=8
+            timeout=6
         )
 
         if r2.status_code != 200:
@@ -183,7 +183,7 @@ def _execute_attempt(
             "https://onboarding.santander.com.mx/api/v1/obu/N2/multitask/curp/consulta",
             headers=headers,
             json={"data": {"birthCountry": "052", "mainPersonalIdentifier": curp}},
-            timeout=10
+            timeout=8
         )
         if r3.status_code != 200:
             err_msg = ""
@@ -232,7 +232,7 @@ def _execute_attempt(
                     "longitude": lon
                 }
             },
-            timeout=28
+            timeout=12
         )
         if r4.status_code != 200:
             pe_code = ""
@@ -337,7 +337,7 @@ def _check_curp_sync(
     en una VPS inaccesible), pedir `proxy=None` devolvia el mismo
     'CONNECT tunnel failed' y parecia que no habia salida sin proxy.
     """
-    for attempt in range(3):
+    for attempt in range(2):
         if not use_proxy:
             p = None
         else:
@@ -346,7 +346,7 @@ def _check_curp_sync(
                                use_proxy=use_proxy)
         if res.get("status") in ("ON", "OFF"):
             return res
-        if attempt < 2 and "Excepción red" in str(res.get("detail", "")):
+        if attempt < 1 and "Excepción red" in str(res.get("detail", "")):
             time.sleep(0.3)
             continue
         return res
