@@ -423,10 +423,9 @@ def get_records(
         where_clauses = []
         params = []
         
-        # Filter out records where birth year is before 1963.
-        # Aligned with purger BORN_AFTER_DEFAULT = "1963-01-01".
-        # Year < 1963 means RFC YY (chars 5-6) is between '27' and '62'.
-        where_clauses.append("(SUBSTR(u6rfc, 5, 2) NOT BETWEEN '27' AND '62' OR LENGTH(u6rfc) < 6)")
+        # Filter out records where birth year is before 1963 or invalid (<18 or >65 years old).
+        # Year >= 1963 and <= 2008 means RFC YY is between '63' and '99' or '00' and '08'.
+        where_clauses.append("((SUBSTR(u6rfc, 5, 2) >= '63' OR SUBSTR(u6rfc, 5, 2) <= '08') OR LENGTH(u6rfc) < 6)")
 
         if filter == "no_curp":
             where_clauses.append("(curp IS NULL OR TRIM(curp) = '')")
@@ -2886,9 +2885,16 @@ HTML_CONTENT = """<!DOCTYPE html>
         🟢 BÓVEDA HITS VIP <span class="nav-badge" id="nav-hits-badge">0</span>
       </button>
     </div>
-    <div id="hits-quick-actions" style="display: none; gap: 8px; align-items: center;">
-      <button class="btn btn-outline" onclick="copyHitsCurps()" title="Copiar todas las CURPs de esta vista de hits">📋 Copiar CURPs HITS</button>
-      <button class="btn btn-excel" onclick="exportHitsCsv()" title="Descargar CSV con todos los HITS">⬇️ Exportar HITS (CSV)</button>
+    <div style="display: flex; gap: 12px; align-items: center; margin-left: auto;">
+      <div id="hits-quick-actions" style="display: none; gap: 8px; align-items: center;">
+        <button class="btn btn-outline" onclick="copyHitsCurps()" title="Copiar todas las CURPs de esta vista de hits">📋 Copiar CURPs HITS</button>
+        <button class="btn btn-excel" onclick="exportHitsCsv()" title="Descargar CSV con todos los HITS">⬇️ Exportar HITS (CSV)</button>
+      </div>
+      <!-- Control Global del Purger (visible en ambas vistas) -->
+      <div style="display: flex; gap: 8px; align-items: center; background: rgba(0,0,0,0.3); padding: 4px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.12);">
+        <button class="btn" id="btn-purger-toggle" onclick="togglePurger()" title="Pausar/Reanudar el llenado del pool automático" style="padding: 4px 10px; font-size: 11.5px; font-weight: 600;">⏸️ Pausar Purger</button>
+        <span id="purger-state-badge" style="font-size:11px; font-weight:700; padding:2px 8px; border-radius:10px; background:#374151; color:#9ca3af;">—</span>
+      </div>
     </div>
   </div>
 
@@ -2951,14 +2957,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       <div class="tb-group">
         <button class="btn btn-excel" onclick="exportCsv()">⬇️ Exportar CSV</button>
         <button class="btn btn-danger-outline" id="btn-clear-all-filters" onclick="clearAllFilters()" style="display:none;">✖ Limpiar Filtros</button>
-      </div>
-
-      <div class="tb-sep"></div>
-
-      <!-- 5. Control del Purger -->
-      <div class="tb-group">
-        <button class="btn" id="btn-purger-toggle" onclick="togglePurger()" title="Pausar/Reanudar el purger automático">⏸️ Pausar Purger</button>
-        <span id="purger-state-badge" style="font-size:11px; padding:2px 8px; border-radius:10px; background:#374151; color:#9ca3af;">—</span>
       </div>
     </div>
 

@@ -1,0 +1,18 @@
+======================================================================
+[*] SANTA BASE -- COSECHADOR UNIVERSAL DE HITS VIP
+======================================================================
+BD: C:\Users\rober\Dropbox\TESTING DEV\data\santander.db
+Estados: NACIONAL (TODOS LOS ESTADOS)
+Filtro de Crédito: Límite >= $50,000 (Prioridad: Límite Más Alto)
+Filtro de Edad: Nacidos de 1963 en adelante (< 65 años)
+Cadencia: 2.0s entre peticiones
+Bóveda Pool Cap: Pausa en 15 hits ACTIVE, Reanuda en 10
+----------------------------------------------------------------------
+
+[+] Lote de 1000 candidatos precargados con límite >= $50,000
+[1] ID:921079 | JUHM630120HPLRRX07 | $910,000 | PUEBLA | T:5879... [🔴 OFF] Rechazo RENAPO/Bloqueado (400: OB-ORQ-05) (2.1s)
+[2] ID:388455 | LASC801023HGRZLR03 | $864,000 | GUERRERO | T:5402... [🔴 OFF] Rechazo RENAPO/Bloqueado (400: OB-ORQ-05) (2.9s)
+[3] ID:2083288 | MOML770904MQTNNP08 | $798,600 | QUERETARO | T:3308... [🔴 OFF] Rechazo bancario (PE170) (9.6s)
+[4] ID:2033106 | SAML650723HQTLLB01 | $726,000 | QUERETARO | T:8644... [🔴 OFF] Rechazo RENAPO/Bloqueado (400: OB-ORQ-05) (2.2s)
+[5] ID:2409134 | MOBD670328HSLLRR02 | $726,000 | SINALOA | T:3534... [🔴 OFF] Rechazo RENAPO/Bloqueado (400: OB-ORQ-05) (3.5s)
+[6] ID:3705509 | HITI640224MHGDLS07 | $700,000 | HIDALGO | T:7570... 
