@@ -6,7 +6,7 @@ After=network.target santander.service
 Type=simple
 User=root
 WorkingDirectory=/opt/kvm4/apps/santander
-ExecStart=/opt/kvm4/venv_santander/bin/python3 /opt/kvm4/apps/santander/santander_purger.py --estados "JALISCO:250,CIUDAD DE MEXICO:250,DURANGO:250" --born-after 1963-01-01 --workers 4 --burst-min 3.5 --cooldown-min 1.5 --prioridad mixto --daemon
+ExecStart=/opt/kvm4/venv_santander/bin/python3 /opt/kvm4/apps/santander/santander_purger.py --estados "JALISCO:250,CIUDAD DE MEXICO:250,DURANGO:250,NUEVO LEON:250,BAJA CALIFORNIA:250,SONORA:250,PUEBLA:250,VERACRUZ:250,GUANAJUATO:250,OAXACA:250,CHIAPAS:250" --born-after 1963-01-01 --workers 4 --burst-min 3.5 --cooldown-min 1.5 --prioridad credito_desc --daemon
 Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1

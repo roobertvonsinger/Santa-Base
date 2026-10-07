@@ -423,9 +423,10 @@ def get_records(
         where_clauses = []
         params = []
         
-        # Filter out records where birth year is before 1962.
-        # Year < 1962 means RFC YY (chars 5-6) is between '27' and '61'.
-        where_clauses.append("(SUBSTR(u6rfc, 5, 2) NOT BETWEEN '27' AND '61' OR LENGTH(u6rfc) < 6)")
+        # Filter out records where birth year is before 1963.
+        # Aligned with purger BORN_AFTER_DEFAULT = "1963-01-01".
+        # Year < 1963 means RFC YY (chars 5-6) is between '27' and '62'.
+        where_clauses.append("(SUBSTR(u6rfc, 5, 2) NOT BETWEEN '27' AND '62' OR LENGTH(u6rfc) < 6)")
 
         if filter == "no_curp":
             where_clauses.append("(curp IS NULL OR TRIM(curp) = '')")
