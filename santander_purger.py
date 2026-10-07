@@ -91,6 +91,7 @@ PROXY_GATE_URL = "http://127.0.0.1:8888/proxy"
 # El status JSON vive siempre junto a la BD activa (mismo directorio que DEFAULT_DB_PATH ya resolvió),
 # nunca hardcodeado por separado — evita que purger y app.py apunten a rutas distintas en VPS.
 STATUS_JSON_PATH = os.path.join(os.path.dirname(DEFAULT_DB_PATH), "purger_status.json")
+PAUSE_FLAG_PATH = os.path.join(os.path.dirname(DEFAULT_DB_PATH), "purger_pause.flag")
 START_URL = "https://onboarding.santander.com.mx/cuenta-digital-lite/product-page?utm_source=google-pmax&utm_medium=multi-channel&utm_campaign=MX_RCB_ACC_DEB_NA_AO_N2-PMAX_CVN_CVN_MLT_GAD_PMX_PMAX_NA_CPA&utm_content=multiple_bonif200"
 
 
@@ -413,6 +414,7 @@ class SegmentedPurgerDaemon:
         self.hits_pool_resume = hits_pool_resume
         self.pause_check_sec = pause_check_sec
         self._paused_for_pool = False  # histeresis: una vez pausado, no retoma hasta llegar a hits_pool_resume
+        self._manual_pause = False    # pausa manual desde UI (archivo flag atomico)
 
         self.writer = SqliteBatchWriter(self.db_path)
         self.running = True
@@ -498,6 +500,17 @@ class SegmentedPurgerDaemon:
         # agotar el segmento (COMPLETED).
         consecutive_cycle_errors = 0
         while self.running:
+            # Pausa manual desde UI: chequea el archivo flag en cada ciclo
+            if os.path.exists(PAUSE_FLAG_PATH):
+                self._manual_pause = True
+                self.stats["state"] = "PAUSED_MANUAL"
+                self._write_status_file()
+                await self._sleep_interruptible(5.0)
+                continue
+            elif self._manual_pause:
+                self._manual_pause = False
+                print("[▶️] Pausa manual liberada. Reanudando.", flush=True)
+
             # Control de cuota: si ya hay suficiente inventario de hits sin trabajar (work_status='ACTIVE'),
             # pausar el gasto de proxy/CPU en vez de seguir acumulando mas de los que los operadores pueden
             # atender. Histeresis (pausa en hits_pool_max, retoma en hits_pool_resume) evita prender/apagar

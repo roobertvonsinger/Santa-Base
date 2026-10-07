@@ -79,8 +79,9 @@ def test_ui_has_glimmer_check_and_no_desktop_redirect():
     # Verify NO external desktop tab redirect anchor to Santander onboarding
     assert '<a href="https://onboarding.santander.com.mx' not in html
 
-def test_age_filter_1962_in_sql():
-    # Verify that the query construction in app.py excludes birth years before 1962
+def test_age_filter_1963_in_sql():
+    # Verify that the query construction in app.py excludes birth years before 1963
+    # (aligned with purger BORN_AFTER_DEFAULT = "1963-01-01")
     with open("app.py", "r", encoding="utf-8") as f:
         code = f.read()
-    assert "SUBSTR(u6rfc, 5, 2) NOT BETWEEN '27' AND '61'" in code
+    assert "SUBSTR(u6rfc, 5, 2) NOT BETWEEN '27' AND '62'" in code

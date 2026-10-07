@@ -866,6 +866,28 @@ def get_purger_status(_: None = Depends(require_auth)):
                 pass
     return {"state": "STOPPED", "total_processed": 0, "hits": 0, "offs": 0, "retries": 0}
 
+@app.post("/api/purger/pause")
+def pause_purger(_: None = Depends(require_auth)):
+    """Pausa manual del purger: crea un archivo flag que el daemon chequea cada ciclo."""
+    flag_path = os.path.join(os.path.dirname(DB_PATH), "purger_pause.flag")
+    try:
+        with open(flag_path, "w") as f:
+            f.write(str(time.time()))
+        return {"ok": True, "paused": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/purger/resume")
+def resume_purger(_: None = Depends(require_auth)):
+    """Reanuda el purger: borra el archivo flag de pausa manual."""
+    flag_path = os.path.join(os.path.dirname(DB_PATH), "purger_pause.flag")
+    try:
+        if os.path.exists(flag_path):
+            os.remove(flag_path)
+        return {"ok": True, "paused": False}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/batch_update")
 def batch_update(payload: BatchUpdatePayload, _: None = Depends(require_auth)):
     if not payload.items:
@@ -2930,6 +2952,14 @@ HTML_CONTENT = """<!DOCTYPE html>
         <button class="btn btn-excel" onclick="exportCsv()">⬇️ Exportar CSV</button>
         <button class="btn btn-danger-outline" id="btn-clear-all-filters" onclick="clearAllFilters()" style="display:none;">✖ Limpiar Filtros</button>
       </div>
+
+      <div class="tb-sep"></div>
+
+      <!-- 5. Control del Purger -->
+      <div class="tb-group">
+        <button class="btn" id="btn-purger-toggle" onclick="togglePurger()" title="Pausar/Reanudar el purger automático">⏸️ Pausar Purger</button>
+        <span id="purger-state-badge" style="font-size:11px; padding:2px 8px; border-radius:10px; background:#374151; color:#9ca3af;">—</span>
+      </div>
     </div>
 
     <!-- Active Filters Indicator Bar -->
@@ -4841,6 +4871,76 @@ function exportCsv() {
       if (colFiltersJson) params.append('col_filters', colFiltersJson);
       window.location.href = `${BASE_PATH}/api/export_csv?${params.toString()}`;
     }
+
+    // --- Control del Purger (pausa/reanuda manual) ---
+    let purgerPaused = false;
+
+    async function togglePurger() {
+      const endpoint = purgerPaused ? '/api/purger/resume' : '/api/purger/pause';
+      try {
+        const res = await fetch(`${BASE_PATH}${endpoint}`, { method: 'POST' });
+        const data = await res.json();
+        purgerPaused = data.paused;
+        updatePurgerUI();
+        showToast(purgerPaused ? 'Purger pausado' : 'Purger reanudado');
+      } catch (e) {
+        showToast('Error: ' + e.message);
+      }
+    }
+
+    function updatePurgerUI() {
+      const btn = document.getElementById('btn-purger-toggle');
+      const badge = document.getElementById('purger-state-badge');
+      if (purgerPaused) {
+        btn.textContent = '▶️ Reanudar Purger';
+        btn.classList.add('btn-success');
+        badge.textContent = 'PAUSADO';
+        badge.style.background = '#dc2626';
+        badge.style.color = '#fff';
+      } else {
+        btn.textContent = '⏸️ Pausar Purger';
+        btn.classList.remove('btn-success');
+        badge.textContent = 'ACTIVO';
+        badge.style.background = '#16a34a';
+        badge.style.color = '#fff';
+      }
+    }
+
+    async function refreshPurgerStatus() {
+      try {
+        const res = await fetch(`${BASE_PATH}/api/purger/status`);
+        const data = await res.json();
+        const badge = document.getElementById('purger-state-badge');
+        const state = data.state || 'STOPPED';
+        if (state === 'PAUSED_MANUAL') {
+          purgerPaused = true;
+          updatePurgerUI();
+        } else if (state === 'PAUSED_HITS_POOL') {
+          badge.textContent = 'PAUSA POOL';
+          badge.style.background = '#f59e0b';
+          badge.style.color = '#000';
+        } else if (state === 'BURST') {
+          badge.textContent = 'BURST';
+          badge.style.background = '#16a34a';
+          badge.style.color = '#fff';
+        } else if (state === 'COOLDOWN') {
+          badge.textContent = 'COOLDOWN';
+          badge.style.background = '#3b82f6';
+          badge.style.color = '#fff';
+        } else if (state === 'COMPLETED') {
+          badge.textContent = 'COMPLETADO';
+          badge.style.background = '#6b7280';
+          badge.style.color = '#fff';
+        } else if (state === 'STOPPED') {
+          badge.textContent = 'DETENIDO';
+          badge.style.background = '#374151';
+          badge.style.color = '#9ca3af';
+        }
+      } catch (e) { /* silencio */ }
+    }
+
+    setInterval(refreshPurgerStatus, 10000);
+    refreshPurgerStatus();
 
     function openBulkCurpModal() {
       document.getElementById('bulk-curp-modal').classList.add('show');
