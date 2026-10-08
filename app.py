@@ -2482,6 +2482,21 @@ HTML_CONTENT = """<!DOCTYPE html>
       font-size: var(--font-size-cell);
       letter-spacing: 0.8px;
     }
+    .addr-text {
+      color: #cbd5e1;
+      font-size: var(--font-size-cell);
+      letter-spacing: 0.2px;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .cp-text {
+      color: #a5b4fc;
+      font-family: var(--font-mono);
+      font-weight: 700;
+      font-size: var(--font-size-cell);
+    }
     .limite-text {
       color: #6ee7b7;
       font-family: var(--font-mono);
@@ -3260,6 +3275,24 @@ HTML_CONTENT = """<!DOCTYPE html>
       return escapeHtml(str);
     }
 
+    function getFullAddressWithCp(addr, cp) {
+      const a = (addr || '').trim();
+      const c = (cp || '').trim();
+      if (!a) return c ? `C.P. ${c}` : '';
+      if (!c) return a;
+      const aLower = a.toLowerCase();
+      if (aLower.includes(c.toLowerCase()) || aLower.includes('c.p.') || aLower.includes('cp ')) {
+        return a;
+      }
+      return `${a}, C.P. ${c}`;
+    }
+
+    function copyFromData(e, elem, label) {
+      if (!elem) return;
+      const text = elem.getAttribute('data-copy-text') || elem.innerText;
+      copyInlineText(e, text, label);
+    }
+
     // Copia al hacer clic en el TEXTO (sin seleccionar celda)
     function copyInlineText(e, text, label) {
       if (e) {
@@ -3637,6 +3670,11 @@ function initApp() {
               }
             } else if (col.key === 'u6acct' && rawVal) {
               displayContent = `<span class="copyable-text card-text" onclick="copyInlineText(event, '${escapeHtml(rawVal)}', 'Tarjeta')" title="Clic en texto para copiar Tarjeta">${escapeHtml(rawVal)}</span>`;
+            } else if (col.key === 'direccion' && rawVal) {
+              const fullAddr = getFullAddressWithCp(rawVal, r.codigo_postal);
+              displayContent = `<span class="copyable-text addr-text" data-copy-text="${escapeHtml(fullAddr)}" onclick="copyFromData(event, this, 'Dirección completa')" title="Clic en texto para copiar dirección con C.P.">${escapeHtml(rawVal)}</span>`;
+            } else if (col.key === 'codigo_postal' && rawVal) {
+              displayContent = `<span class="copyable-text cp-text" onclick="copyInlineText(event, '${escapeHtml(rawVal)}', 'Código Postal')" title="Clic en texto para copiar C.P.">${escapeHtml(rawVal)}</span>`;
             } else if (col.key === 'u6licrea' && rawVal) {
               const numVal = parseInt(rawVal, 10);
               const formattedLim = !isNaN(numVal) ? '$' + numVal.toLocaleString('es-MX') : '$' + rawVal;
@@ -5198,7 +5236,9 @@ function exportCsv() {
               <td style="font-family: var(--font-mono); font-weight: 700; font-size: 11px; text-align: center; color: #a5b4fc;">
                 ${cpEsc ? `<span class="copyable-text" onclick="copyInlineText(event, '${cpEsc}', 'Código Postal')" title="Copiar CP">${cpEsc}</span>` : '<span style="color:var(--text-dim);">-</span>'}
               </td>
-              <td style="font-size: 11px; color: var(--text-muted);" title="${escapeHtml(h.direccion || '')}">${escapeHtml(h.direccion || '')}</td>
+              <td style="font-size: 11px; color: var(--text-muted);" title="${escapeHtml(h.direccion || '')}">
+                ${h.direccion ? `<span class="copyable-text addr-text" data-copy-text="${escapeHtml(getFullAddressWithCp(h.direccion, h.codigo_postal))}" onclick="copyFromData(event, this, 'Dirección completa')" title="Clic en texto para copiar dirección con C.P.">${escapeHtml(h.direccion)}</span>` : '<span style="color:var(--text-dim);">-</span>'}
+              </td>
               <td style="font-size: 11px; color: #fbbf24;" id="hit-op-${h.id}">${escapeHtml(h.operador || '-')}</td>
               <td>
                 <input type="text" class="hit-notes-input" value="${escapeHtml(h.notas || '')}"

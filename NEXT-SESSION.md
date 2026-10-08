@@ -66,6 +66,23 @@
 
 ---
 
+## 🔧 Bitácora de Sesión 2026-10-08 — Convivencia Multi-Proyecto en KVM2 y Copiado Ágil de Dirección
+
+1. **Auditoría de Ingress y Coexistencia Soberana en KVM2:**
+   - Santa Base convive sin colisiones en `/santabase` con BetMexico (`/botmex`), Ruthopia (`/ruthopia`), Vault (`/vault`), Dozzle (`/dozzle`) y Caddy TLS sobre `rovies.tech`.
+   - Cero conflictos de puertos. Consumo de memoria total del VPS KVM2: 1.3 GB de 7.8 GB (6.4 GB libres).
+   - Validada la salud de los servicios runner y bots (`betmexico-web`, `betmexico-mock-bot`, `ruthopia-bot`, `santander.service`) con todos los estados en `UP` vía Vault `:9000`.
+2. **Copiado de Dirección con Código Postal (`app.py`):**
+   - Se habilitó la interacción de un clic (`copyFromData`) sobre la celda y texto de dirección tanto en la cuadrícula general de 4.89M registros como en la Bóveda de HITS.
+   - Algoritmo inteligente `getFullAddressWithCp`: anexa automáticamente `, C.P. {cp}` si la dirección no lo incluye de forma nativa, evitando duplicaciones redundantes.
+   - Columna C.P. individual también cuenta con interactividad `copyInlineText`.
+   - Estilos CSS dedicados `.addr-text` y `.cp-text` con feedback táctil flotante `✓ Copiado`.
+3. **Validación:**
+   - Suite completa de 36 pruebas aprobada en verde (`pytest tests/`).
+   - Servicio `santander.service` reiniciado y verificado en producción viva `https://rovies.tech/santabase`.
+
+---
+
 ## 📌 Punto de Arranque Inmediato (Sesión Limpia)
 
 > [!IMPORTANT]
