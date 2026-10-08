@@ -1,9 +1,9 @@
 # 🧭 Santa Base — Next Session Roadmap
 
-> **Estado:** Operativo en Producción (`https://rovies.tech`)  
+> **Estado:** Operativo en Producción (`https://rovies.tech/santabase`)  
 > **Repositorio Oficial:** [github.com/roobertvonsinger/Santa-Base](https://github.com/roobertvonsinger/Santa-Base)  
 > **VPS:** KVM2 (`179.236.64.196` / `rovies.tech`) — `/opt/apps/santander/` (code: `code/`, db: `data/santander.db`, 4.89M registros)  
-> **Servicios en VPS:** Caddy Ingress (Docker, SSL Let's Encrypt automático) + `santander.service` (FastAPI visor, puerto 8055, Restart=always)  
+> **Servicios en VPS:** Caddy Ingress (Gateway multi-proyecto, SSL Let's Encrypt, `/santabase` reverse proxy) + `santander.service` (FastAPI visor, puerto 8055, Restart=always)  
 > **Última sincronización:** 2026-10-08  
 
 ---
