@@ -1,0 +1,19 @@
+[Unit]
+Description=Santa Base — Motor de Cosecha Desacoplado (Pre-Pool + Verificacion de Tarjeta)
+After=network.target santander.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/apps/santander/code
+Environment="PYTHONPATH=/opt/apps/santander/code"
+Environment="SANTANDER_DB_PATH=/opt/apps/santander/data/santander.db"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/usr/bin/xvfb-run -a /opt/apps/santander/venv/bin/python3 /opt/apps/santander/code/scripts/harvest_jalisco_hits.py --daemon --min-credito 50000 --concurrency 2 --delay 0.5 --target-hits 50
+Restart=always
+RestartSec=10
+StandardOutput=append:/opt/apps/santander/logs/harvest.log
+StandardError=append:/opt/apps/santander/logs/harvest.log
+
+[Install]
+WantedBy=multi-user.target

@@ -77,9 +77,13 @@
    - Algoritmo inteligente `getFullAddressWithCp`: anexa automáticamente `, C.P. {cp}` si la dirección no lo incluye de forma nativa, evitando duplicaciones redundantes.
    - Columna C.P. individual también cuenta con interactividad `copyInlineText`.
    - Estilos CSS dedicados `.addr-text` y `.cp-text` con feedback táctil flotante `✓ Copiado`.
-3. **Validación:**
+3. **Despliegue del Motor de Cosecha Desacoplado (`santander-harvest.service`):**
+   - Implementado en KVM2 bajo systemd gestionado con entorno virtual (`/opt/apps/santander/venv`), Xvfb para Chromium headful headless en servidor y auto-reinicio (`Restart=always`).
+   - Arquitectura de 2 fases: Productor (Onboarding con proxy rotativo residencial a 2 workers ~8-12 reg/min) y Consumidor (Verificación de tarjeta en Santander Web con IP directa).
+   - Telemetría en tiempo real conectada a `/santabase/api/purger/status` y botón de pausa/reanudación del panel web.
+4. **Validación:**
    - Suite completa de 36 pruebas aprobada en verde (`pytest tests/`).
-   - Servicio `santander.service` reiniciado y verificado en producción viva `https://rovies.tech/santabase`.
+   - Servicio `santander.service` y `santander-harvest.service` activos y medidos en producción viva.
 
 ---
 

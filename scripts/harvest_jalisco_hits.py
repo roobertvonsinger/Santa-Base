@@ -40,7 +40,20 @@ for _stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
-DB_PATH = r"C:\Users\rober\Dropbox\TESTING DEV\data\santander.db"
+DB_PATH = os.environ.get("SANTANDER_DB_PATH")
+if not DB_PATH or not os.path.exists(DB_PATH):
+    candidatas = [
+        "/opt/apps/santander/data/santander.db",
+        r"C:\Users\rober\Dropbox\TESTING DEV\data\santander.db",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "santander.db")),
+    ]
+    for c in candidatas:
+        if os.path.exists(c):
+            DB_PATH = c
+            break
+    if not DB_PATH:
+        DB_PATH = candidatas[0]
+
 STATUS_JSON_PATH = os.path.join(os.path.dirname(DB_PATH), "purger_status.json")
 PAUSE_FLAG_PATH = os.path.join(os.path.dirname(DB_PATH), "purger_pause.flag")
 
