@@ -1,10 +1,10 @@
 # 🧭 Santa Base — Next Session Roadmap
 
-> **Estado:** Operativo en Producción (`https://2puty.tech/santander`)  
+> **Estado:** Operativo en Producción (`https://rovies.tech`)  
 > **Repositorio Oficial:** [github.com/roobertvonsinger/Santa-Base](https://github.com/roobertvonsinger/Santa-Base)  
-> **VPS:** Karen KVM4 (`2.25.98.162`) — `/opt/kvm4/apps/santander/` (código + `data/santander.db`, 4.9M registros, mismo directorio)  
-> **Servicios systemd en VPS:** `santander.service` (visor FastAPI, puerto 8055, Restart=always) + `santander-purger.service` (auto-revisión de CURPs, Restart=always, unit en `scripts/santander-purger.service`)  
-> **Última sincronización:** 2026-10-04  
+> **VPS:** KVM2 (`179.236.64.196` / `rovies.tech`) — `/opt/apps/santander/` (code: `code/`, db: `data/santander.db`, 4.89M registros)  
+> **Servicios en VPS:** Caddy Ingress (Docker, SSL Let's Encrypt automático) + `santander.service` (FastAPI visor, puerto 8055, Restart=always)  
+> **Última sincronización:** 2026-10-08  
 
 ---
 
