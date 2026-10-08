@@ -58,8 +58,10 @@ async def security_and_routing_middleware(request: Request, call_next):
     if ".." in path or "//" in path or "\\" in path or "/." in path:
         return RawResponse(content="Acceso denegado: ruta no permitida", status_code=400)
     
-    # 2. Reescritura transparente de /santabase/api/ -> /api/
+    # 2. Reescritura transparente de /santabase/api/ -> /api/ y assets estaticos
     if path.startswith("/santabase/api/"):
+        request.scope["path"] = path.replace("/santabase", "", 1)
+    elif path.startswith("/santabase/static/"):
         request.scope["path"] = path.replace("/santabase", "", 1)
         
     response = await call_next(request)
@@ -1109,7 +1111,7 @@ HTML_CONTENT = """<!DOCTYPE html>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.2/anime.min.js"></script>
-  <script>if (typeof anime === 'undefined') { document.write('<script src="/static/anime.min.js"><' + '/script>'); }</script>
+  <script>if (typeof anime === 'undefined') { const p = window.location.pathname.startsWith('/santabase') ? '/santabase' : ''; document.write('<script src="' + p + '/static/anime.min.js"><' + '/script>'); }</script>
   <style>
     :root {
       /* Superficies y Fondos — Red & Obsidian Ops */
